@@ -6,7 +6,7 @@
 <h2><center>IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System</h2>
 
 <p align="center">
-<a href='https://arxiv.org/abs/2502.05512'><img src='https://img.shields.io/badge/ArXiv--red'></a>
+<a href='https://arxiv.org/abs/2502.05512'><img src='https://img.shields.io/badge/ArXiv-2502.05512-red'></a>
 
 ## 👉🏻 IndexTTS 👈🏻
 
@@ -39,131 +39,32 @@ The main improvements and contributions are summarized as follows:
 
 ## 📑 Evaluation
 
-**Word Error Rate (WER) and Speaker Similarity (SS) Results for IndexTTS and Baseline Models**
+**Word Error Rate (WER) Results for IndexTTS and Baseline Models**
 
-<style type="text/css">
-.tg  {border-collapse:collapse;border-spacing:0;}
-.tg td{border-color:black;border-style:solid;border-width:1px;font-family:Arial, sans-serif;font-size:14px;
-  overflow:hidden;padding:10px 5px;word-break:normal;}
-.tg th{border-color:black;border-style:solid;border-width:1px;font-family:Arial, sans-serif;font-size:14px;
-  font-weight:normal;overflow:hidden;padding:10px 5px;word-break:normal;}
-.tg .tg-c3ow{border-color:inherit;text-align:center;vertical-align:top}
-.tg .tg-7btt{border-color:inherit;font-weight:bold;text-align:center;vertical-align:top}
-</style>
-<table class="tg"><thead>
-  <tr>
-    <th class="tg-7btt" rowspan="2">Model</th>
-    <th class="tg-7btt" colspan="2">aishell1_test</th>
-    <th class="tg-7btt" colspan="2">commonvoice_20_test_zh</th>
-    <th class="tg-7btt" colspan="2">commonvoice_20_test_en</th>
-    <th class="tg-7btt" colspan="2">librispeech_test_clean</th>
-    <th class="tg-7btt" colspan="2">avg</th>
-  </tr>
-  <tr>
-    <th class="tg-7btt">CER(%)↓</th>
-    <th class="tg-7btt">SS↑</th>
-    <th class="tg-7btt">CER(%)↓</th>
-    <th class="tg-7btt">SS↑</th>
-    <th class="tg-7btt">WER(%)↓</th>
-    <th class="tg-7btt">SS↑</th>
-    <th class="tg-7btt">WER(%)↓</th>
-    <th class="tg-7btt">SS↑</th>
-    <th class="tg-7btt">CER(%)↓</th>
-    <th class="tg-7btt">SS↑</th>
-  </tr></thead>
-<tbody>
-  <tr>
-    <td class="tg-7btt">Human</td>
-    <td class="tg-c3ow">2.0 </td>
-    <td class="tg-c3ow">0.846</td>
-    <td class="tg-c3ow">9.5 </td>
-    <td class="tg-c3ow">0.809</td>
-    <td class="tg-c3ow">10.0 </td>
-    <td class="tg-c3ow">0.820</td>
-    <td class="tg-c3ow">2.4 </td>
-    <td class="tg-c3ow">0.858</td>
-    <td class="tg-c3ow">5.1 </td>
-    <td class="tg-c3ow">0.836</td>
-  </tr>
-  <tr>
-    <td class="tg-7btt">CosyVoice 2</td>
-    <td class="tg-c3ow">1.8 </td>
-    <td class="tg-7btt">0.796</td>
-    <td class="tg-c3ow">9.1 </td>
-    <td class="tg-c3ow">0.743</td>
-    <td class="tg-c3ow">7.3 </td>
-    <td class="tg-c3ow">0.742</td>
-    <td class="tg-c3ow">4.9 </td>
-    <td class="tg-7btt">0.837</td>
-    <td class="tg-c3ow">5.9 </td>
-    <td class="tg-7btt">0.788</td>
-  </tr>
-  <tr>
-    <td class="tg-7btt">F5TTS</td>
-    <td class="tg-c3ow">3.9 </td>
-    <td class="tg-c3ow">0.743</td>
-    <td class="tg-c3ow">11.7 </td>
-    <td class="tg-7btt">0.747</td>
-    <td class="tg-c3ow">5.4 </td>
-    <td class="tg-c3ow">0.746</td>
-    <td class="tg-c3ow">7.8 </td>
-    <td class="tg-c3ow">0.828</td>
-    <td class="tg-c3ow">8.2 </td>
-    <td class="tg-c3ow">0.779</td>
-  </tr>
-  <tr>
-    <td class="tg-7btt">Fishspeech</td>
-    <td class="tg-c3ow">2.4 </td>
-    <td class="tg-c3ow">0.488</td>
-    <td class="tg-c3ow">11.4 </td>
-    <td class="tg-c3ow">0.552</td>
-    <td class="tg-c3ow">8.8 </td>
-    <td class="tg-c3ow">0.622</td>
-    <td class="tg-c3ow">8.0 </td>
-    <td class="tg-c3ow">0.701</td>
-    <td class="tg-c3ow">8.3 </td>
-    <td class="tg-c3ow">0.612</td>
-  </tr>
-  <tr>
-    <td class="tg-7btt">FireRedTTS</td>
-    <td class="tg-c3ow">2.2 </td>
-    <td class="tg-c3ow">0.579</td>
-    <td class="tg-c3ow">11.0 </td>
-    <td class="tg-c3ow">0.593</td>
-    <td class="tg-c3ow">16.3 </td>
-    <td class="tg-c3ow">0.587</td>
-    <td class="tg-c3ow">5.7 </td>
-    <td class="tg-c3ow">0.698</td>
-    <td class="tg-c3ow">7.7 </td>
-    <td class="tg-c3ow">0.631</td>
-  </tr>
-  <tr>
-    <td class="tg-7btt">XTTS</td>
-    <td class="tg-c3ow">3.0 </td>
-    <td class="tg-c3ow">0.573</td>
-    <td class="tg-c3ow">11.4 </td>
-    <td class="tg-c3ow">0.586</td>
-    <td class="tg-c3ow">7.1 </td>
-    <td class="tg-c3ow">0.648</td>
-    <td class="tg-c3ow">3.5 </td>
-    <td class="tg-c3ow">0.761</td>
-    <td class="tg-c3ow">6.0 </td>
-    <td class="tg-c3ow">0.663</td>
-  </tr>
-  <tr>
-    <td class="tg-7btt">IndexTTS</td>
-    <td class="tg-7btt">1.3 </td>
-    <td class="tg-c3ow">0.744</td>
-    <td class="tg-7btt">7.0 </td>
-    <td class="tg-c3ow">0.742</td>
-    <td class="tg-7btt">5.3 </td>
-    <td class="tg-7btt">0.753</td>
-    <td class="tg-7btt">2.1 </td>
-    <td class="tg-c3ow">0.823</td>
-    <td class="tg-7btt">3.7 </td>
-    <td class="tg-c3ow">0.776</td>
-  </tr>
-</tbody></table>
+
+|    **Model**    | **aishell1_test** | **commonvoice_20_test_zh** | **commonvoice_20_test_en** | **librispeech_test_clean** |  **avg** |
+|:---------------:|:-----------------:|:--------------------------:|:--------------------------:|:--------------------------:|:--------:|
+|    **Human**    |        2.0        |            9.5             |            10.0            |            2.4             |   5.1    |
+| **CosyVoice 2** |        1.8        |            9.1             |            7.3             |            4.9             |   5.9    |
+|    **F5TTS**    |        3.9        |            11.7            |            5.4             |            7.8             |   8.2    |
+|  **Fishspeech** |        2.4        |            11.4            |            8.8             |            8.0             |   8.3    |
+|  **FireRedTTS** |        2.2        |            11.0            |            16.3            |            5.7             |   7.7    |
+|     **XTTS**    |        3.0        |            11.4            |            7.1             |            3.5             |   6.0    |
+|   **IndexTTS**  |      **1.3**     |          **7.0**          |          **5.3**          |          **2.1**          | **3.7** |
+
+
+**Speaker Similarity (SS) Results for IndexTTS and Baseline Models**
+
+|    **Model**    | **aishell1_test** | **commonvoice_20_test_zh** | **commonvoice_20_test_en** | **librispeech_test_clean** |  **avg**  |
+|:---------------:|:-----------------:|:--------------------------:|:--------------------------:|:--------------------------:|:---------:|
+|    **Human**    |       0.846       |            0.809           |            0.820           |            0.858           |   0.836   |
+| **CosyVoice 2** |     **0.796**     |            0.743           |            0.742           |          **0.837**         | **0.788** |
+|    **F5TTS**    |       0.743       |          **0.747**         |            0.746           |            0.828           |   0.779   |
+|  **Fishspeech** |       0.488       |            0.552           |            0.622           |            0.701           |   0.612   |
+|  **FireRedTTS** |       0.579       |            0.593           |            0.587           |            0.698           |   0.631   |
+|     **XTTS**    |       0.573       |            0.586           |            0.648           |            0.761           |   0.663   |
+|   **IndexTTS**  |       0.744       |            0.742           |          **0.758**         |            0.823           |   0.776   |
+
 
 
 **MOS Scores for Zero-Shot Cloned Voice**
@@ -183,13 +84,10 @@ The main improvements and contributions are summarized as follows:
 🌟 If you find our work helpful, please leave us a star and cite our paper.
 
 ```
-@misc{deng2025indexttsindustriallevelcontrollableefficient,
-      title={IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System}, 
-      author={Wei Deng and Siyi Zhou and Jingchen Shu and Jinchao Wang and Lu Wang},
-      year={2025},
-      eprint={2502.05512},
-      archivePrefix={arXiv},
-      primaryClass={cs.SD},
-      url={https://arxiv.org/abs/2502.05512}, 
+@article{deng2025indextts,
+  title={IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System},
+  author={Wei Deng, Siyi Zhou, Jingchen Shu, Jinchao Wang, Lu Wang},
+  journal={arXiv preprint arXiv:2502.05512},
+  year={2025}
 }
 ```
