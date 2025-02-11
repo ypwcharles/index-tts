@@ -25,8 +25,8 @@ The overview of IndexTTS is shown as follows.
   <img src="assets/IndexTTS.png"  width="800"/>
 </picture>
 
-The main improvements and contributions are summarized as follows:
 
+The main improvements and contributions are summarized as follows:
  - In Chinese scenarios, we have introduced a character-pinyin hybrid modeling approach. This allows for quick correction of mispronounced characters.
  - **IndexTTS** incorporate a conformer conditioning encoder and a BigVGAN2-based speechcode decoder. This improves training stability, voice timbre similarity, and sound quality.
  - We release all test sets here, including those for polysyllabic words, subjective and objective test sets.
