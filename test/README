@@ -1,0 +1,5 @@
+1. test_key.scp
+prompt_key, target_text_key
+
+2. test.clean.csv     
+key, audio_path, speaker_id, lang_id, text
