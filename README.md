@@ -22,7 +22,7 @@ Experience **IndexTTS**: Please contact <u>xuanwu@bilibili.com</u> for more deta
 The overview of IndexTTS is shown as follows.
 
 <picture>
-  <img src="assets/indexTTS.png"  width="800"/>
+  <img src="assets/IndexTTS.png"  width="800"/>
 </picture>
 
 The main improvements and contributions are summarized as follows:
