@@ -33,13 +33,13 @@ The main improvements and contributions are summarized as follows:
 
 ## 📣 Updates
 
-- `2025/03/21` 🔥🔥 We release the model parameters and inference code.
+- `2025/03/25` 🔥🔥 We release the model parameters and inference code.
 - `2025/02/12` 🔥 We submitted our paper on arXiv, and released our demos and test sets.
 
 ## Model Download
-| **HuggingFace**                                          | **ModelScope**|
-|----------------------------------------------------------|----------------|
-| [😁IndexTTS](https://huggingface.co/index-tts/index-tts) | [IndexTTS](https://modelscope.ai/models/index-tts/index-tts) |
+| **HuggingFace**                                          |
+|----------------------------------------------------------|
+| [😁IndexTTS](https://huggingface.co/IndexTeam/Index-TTS) |
 
 
 ## 📑 Evaluation
