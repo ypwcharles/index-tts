@@ -1,3 +1,10 @@
+---
+title: {{IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System}}
+emoji: {{🎙️}}
+app_file: webui.py
+pinned: false
+---
+
 <div align="center">
 <img src='assets/index_icon.png' width="250"/>
 </div>
