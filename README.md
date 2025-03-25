@@ -1,4 +1,4 @@
-﻿<div align="center">
+<div align="center">
 <img src='assets/index_icon.png' width="250"/>
 </div>
 
@@ -33,8 +33,13 @@ The main improvements and contributions are summarized as follows:
 
 ## 📣 Updates
 
-- `2025/02/12` 🔥🔥We submitted our paper on arXiv, and released our demos and test sets.
-- [WIP] We plan to release the model parameters and code in a few weeks.
+- `2025/03/21` 🔥🔥 We release the model parameters and inference code.
+- `2025/02/12` 🔥 We submitted our paper on arXiv, and released our demos and test sets.
+
+## Model Download
+| **HuggingFace**                                          | **ModelScope**|
+|----------------------------------------------------------|----------------|
+| [😁IndexTTS](https://huggingface.co/index-tts/index-tts) | [IndexTTS](https://modelscope.ai/models/index-tts/index-tts) |
 
 
 ## 📑 Evaluation
@@ -78,6 +83,46 @@ The main improvements and contributions are summarized as follows:
 | **XTTS**        |    3.23     |    2.99    |    3.10     |   3.11    |
 | **IndexTTS**    |    **3.79**     |    **4.20**    |    **4.05**     |   **4.01**    |
 
+
+## Usage Instructions
+### Environment Setup
+1. Download this repository:
+```bash
+git clone https://github.com/index-tts/index-tts.git
+```
+2. Install dependencies:
+```bash
+conda create -n index-tts python=3.10
+conda activate index-tts
+pip install -r requirements.txt
+apt-get install ffmpeg
+```
+3. Run test script:
+```bash
+# Please put your prompt audio in 'test_data' and rename it to 'input.wav'
+python indextts/infer.py
+```
+#### Web Demo
+```bash
+python webui.py
+```
+Open your browser and visit `http://127.0.0.1:7860` to see the demo.
+
+#### Sample Code
+```python
+from indextts.infer import IndexTTS
+tts = IndexTTS(model_dir="checkpoints",cfg_path="checkpoints/config.yaml")
+voice="reference_voice.wav"
+text="大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！比如说，现在正在说话的其实是B站为我现场复刻的数字分身，简直就是平行宇宙的另一个我了。如果大家也想体验更多深入的AIGC功能，可以访问 bilibili studio，相信我，你们也会吃惊的。"
+tts.infer(voice, text, output_path)
+```
+
+## Acknowledge
+1. [tortoise-tts](https://github.com/neonbjb/tortoise-tts)
+2. [XTTSv2](https://github.com/coqui-ai/TTS)
+3. [BigVGAN](https://github.com/NVIDIA/BigVGAN)
+4. [wenet](https://github.com/wenet-e2e/wenet/tree/main)
+5. [icefall](https://github.com/k2-fsa/icefall)
 
 ## 📚 Citation
 
