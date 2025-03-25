@@ -3,6 +3,7 @@ title: "IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-
 emoji: "🎙"
 colorFrom: "gray"
 colorTo: "pink"
+python_version: "3.10"
 sdk: "gradio"
 sdk_version: "5.23.0"
 app_file: webui.py
