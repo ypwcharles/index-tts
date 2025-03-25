@@ -1,6 +1,6 @@
 ---
-title: {{IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System}}
-emoji: {{🎙️}}
+title: "IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System"
+emoji: "🎙"
 app_file: webui.py
 pinned: false
 ---
