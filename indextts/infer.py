@@ -1,16 +1,18 @@
 import os
 import re
 import sys
+
+import sentencepiece as spm
 import torch
 import torchaudio
 from omegaconf import OmegaConf
-import sentencepiece as spm
-from utils.utils import tokenize_by_CJK_char
-from utils.feature_extractors import MelSpectrogramFeatures
-from indextts.vqvae.xtts_dvae import DiscreteVAE
-from indextts.utils.checkpoint import load_checkpoint
-from indextts.gpt.model import UnifiedVoice
+
 from indextts.BigVGAN.models import BigVGAN as Generator
+from indextts.gpt.model import UnifiedVoice
+from indextts.utils.checkpoint import load_checkpoint
+from indextts.utils.feature_extractors import MelSpectrogramFeatures
+from indextts.utils.utils import tokenize_by_CJK_char
+from indextts.vqvae.xtts_dvae import DiscreteVAE
 
 
 class IndexTTS:
@@ -107,18 +109,18 @@ class IndexTTS:
             print(text_len)
             with torch.no_grad():
                 codes = self.gpt.inference_speech(auto_conditioning, text_tokens,
-                                             cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]],
-                                                                           device=text_tokens.device),
-                                             # text_lengths=text_len,
-                                             do_sample=True,
-                                             top_p=top_p,
-                                             top_k=top_k,
-                                             temperature=temperature,
-                                             num_return_sequences=autoregressive_batch_size,
-                                             length_penalty=length_penalty,
-                                             num_beams=num_beams,
-                                             repetition_penalty=repetition_penalty,
-                                             max_generate_length=max_mel_tokens)
+                                                  cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]],
+                                                                                device=text_tokens.device),
+                                                  # text_lengths=text_len,
+                                                  do_sample=True,
+                                                  top_p=top_p,
+                                                  top_k=top_k,
+                                                  temperature=temperature,
+                                                  num_return_sequences=autoregressive_batch_size,
+                                                  length_penalty=length_penalty,
+                                                  num_beams=num_beams,
+                                                  repetition_penalty=repetition_penalty,
+                                                  max_generate_length=max_mel_tokens)
                 print(codes)
                 print(f"codes shape: {codes.shape}")
                 codes = codes[:, :-2]
@@ -126,10 +128,10 @@ class IndexTTS:
                 # latent, text_lens_out, code_lens_out = \
                 latent = \
                     self.gpt(auto_conditioning, text_tokens,
-                        torch.tensor([text_tokens.shape[-1]], device=text_tokens.device), codes,
-                        torch.tensor([codes.shape[-1] * self.gpt.mel_length_compression], device=text_tokens.device),
-                        cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]], device=text_tokens.device),
-                        return_latent=True, clip_inputs=False)
+                             torch.tensor([text_tokens.shape[-1]], device=text_tokens.device), codes,
+                             torch.tensor([codes.shape[-1] * self.gpt.mel_length_compression], device=text_tokens.device),
+                             cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]], device=text_tokens.device),
+                             return_latent=True, clip_inputs=False)
                 latent = latent.transpose(1, 2)
                 '''
                 latent_list = []
@@ -155,4 +157,4 @@ class IndexTTS:
 
 if __name__ == "__main__":
     tts = IndexTTS(cfg_path="checkpoints/config.yaml", model_dir="checkpoints")
-    tts.infer(audio_prompt='test_data/input.wav', text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！',output_path="gen.wav")
+    tts.infer(audio_prompt='test_data/input.wav', text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！', output_path="gen.wav")

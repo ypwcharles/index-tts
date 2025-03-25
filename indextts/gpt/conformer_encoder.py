@@ -3,11 +3,18 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-from gpt.conformer.subsampling import Conv2dSubsampling4, Conv2dSubsampling6, \
-    Conv2dSubsampling8, LinearNoSubsampling, Conv2dSubsampling2
-from gpt.conformer.embedding import PositionalEncoding, RelPositionalEncoding, NoPositionalEncoding
-from gpt.conformer.attention import MultiHeadedAttention, RelPositionMultiHeadedAttention
-from utils.utils import make_pad_mask
+
+from indextts.gpt.conformer.attention import (MultiHeadedAttention,
+                                              RelPositionMultiHeadedAttention)
+from indextts.gpt.conformer.embedding import (NoPositionalEncoding,
+                                              PositionalEncoding,
+                                              RelPositionalEncoding)
+from indextts.gpt.conformer.subsampling import (Conv2dSubsampling2,
+                                                Conv2dSubsampling4,
+                                                Conv2dSubsampling6,
+                                                Conv2dSubsampling8,
+                                                LinearNoSubsampling)
+from indextts.utils.utils import make_pad_mask
 
 
 class PositionwiseFeedForward(torch.nn.Module):
@@ -22,6 +29,7 @@ class PositionwiseFeedForward(torch.nn.Module):
         dropout_rate (float): Dropout rate.
         activation (torch.nn.Module): Activation function
     """
+
     def __init__(self,
                  idim: int,
                  hidden_units: int,
@@ -47,6 +55,7 @@ class PositionwiseFeedForward(torch.nn.Module):
 
 class ConvolutionModule(nn.Module):
     """ConvolutionModule in Conformer model."""
+
     def __init__(self,
                  channels: int,
                  kernel_size: int = 15,
@@ -181,6 +190,7 @@ class ConformerEncoderLayer(nn.Module):
             True: x -> x + linear(concat(x, att(x)))
             False: x -> x + att(x)
     """
+
     def __init__(
         self,
         size: int,
@@ -428,6 +438,7 @@ class BaseEncoder(torch.nn.Module):
 
 class ConformerEncoder(BaseEncoder):
     """Conformer encoder module."""
+
     def __init__(
         self,
         input_size: int,
@@ -507,4 +518,3 @@ class ConformerEncoder(BaseEncoder):
                 concat_after,
             ) for _ in range(num_blocks)
         ])
-

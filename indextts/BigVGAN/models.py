@@ -1,17 +1,16 @@
-# Copyright (c) 2022 NVIDIA CORPORATION. 
+# Copyright (c) 2022 NVIDIA CORPORATION.
 #   Licensed under the MIT license.
 
 # Adapted from https://github.com/jik876/hifi-gan under the MIT license.
 #   LICENSE is in incl_licenses directory.
 
-from torch.nn import Conv1d, ConvTranspose1d, Conv2d
-from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
+from torch.nn import Conv1d, Conv2d, ConvTranspose1d
+from torch.nn.utils import remove_weight_norm, spectral_norm, weight_norm
 
 import indextts.BigVGAN.activations as activations
-from indextts.BigVGAN.utils import init_weights, get_padding
 from indextts.BigVGAN.alias_free_torch import *
-
 from indextts.BigVGAN.ECAPA_TDNN import ECAPA_TDNN
+from indextts.BigVGAN.utils import get_padding, init_weights
 
 LRELU_SLOPE = 0.1
 
@@ -41,19 +40,19 @@ class AMPBlock1(torch.nn.Module):
         ])
         self.convs2.apply(init_weights)
 
-        self.num_layers = len(self.convs1) + len(self.convs2) # total number of conv layers
+        self.num_layers = len(self.convs1) + len(self.convs2)  # total number of conv layers
 
-        if activation == 'snake': # periodic nonlinearity with snake function and anti-aliasing
+        if activation == 'snake':  # periodic nonlinearity with snake function and anti-aliasing
             self.activations = nn.ModuleList([
                 Activation1d(
                     activation=activations.Snake(channels, alpha_logscale=h.snake_logscale))
                 for _ in range(self.num_layers)
             ])
-        elif activation == 'snakebeta': # periodic nonlinearity with snakebeta function and anti-aliasing
+        elif activation == 'snakebeta':  # periodic nonlinearity with snakebeta function and anti-aliasing
             self.activations = nn.ModuleList([
                 Activation1d(
                     activation=activations.SnakeBeta(channels, alpha_logscale=h.snake_logscale))
-                 for _ in range(self.num_layers)
+                for _ in range(self.num_layers)
             ])
         else:
             raise NotImplementedError("activation incorrectly specified. check the config file and look for 'activation'.")
@@ -89,25 +88,25 @@ class AMPBlock2(torch.nn.Module):
         ])
         self.convs.apply(init_weights)
 
-        self.num_layers = len(self.convs) # total number of conv layers
+        self.num_layers = len(self.convs)  # total number of conv layers
 
-        if activation == 'snake': # periodic nonlinearity with snake function and anti-aliasing
+        if activation == 'snake':  # periodic nonlinearity with snake function and anti-aliasing
             self.activations = nn.ModuleList([
                 Activation1d(
                     activation=activations.Snake(channels, alpha_logscale=h.snake_logscale))
                 for _ in range(self.num_layers)
             ])
-        elif activation == 'snakebeta': # periodic nonlinearity with snakebeta function and anti-aliasing
+        elif activation == 'snakebeta':  # periodic nonlinearity with snakebeta function and anti-aliasing
             self.activations = nn.ModuleList([
                 Activation1d(
                     activation=activations.SnakeBeta(channels, alpha_logscale=h.snake_logscale))
-                 for _ in range(self.num_layers)
+                for _ in range(self.num_layers)
             ])
         else:
             raise NotImplementedError("activation incorrectly specified. check the config file and look for 'activation'.")
 
     def forward(self, x):
-        for c, a in zip (self.convs, self.activations):
+        for c, a in zip(self.convs, self.activations):
             xt = a(x)
             xt = c(xt)
             x = xt + x
@@ -127,7 +126,7 @@ class BigVGAN(torch.nn.Module):
 
         self.num_kernels = len(h.resblock_kernel_sizes)
         self.num_upsamples = len(h.upsample_rates)
-        
+
         self.feat_upsample = h.feat_upsample
         self.cond_in_each_up_layer = h.cond_d_vector_in_each_upsampling_layer
 
@@ -154,10 +153,10 @@ class BigVGAN(torch.nn.Module):
                 self.resblocks.append(resblock(h, ch, k, d, activation=h.activation))
 
         # post conv
-        if h.activation == "snake": # periodic nonlinearity with snake function and anti-aliasing
+        if h.activation == "snake":  # periodic nonlinearity with snake function and anti-aliasing
             activation_post = activations.Snake(ch, alpha_logscale=h.snake_logscale)
             self.activation_post = Activation1d(activation=activation_post)
-        elif h.activation == "snakebeta": # periodic nonlinearity with snakebeta function and anti-aliasing
+        elif h.activation == "snakebeta":  # periodic nonlinearity with snakebeta function and anti-aliasing
             activation_post = activations.SnakeBeta(ch, alpha_logscale=h.snake_logscale)
             self.activation_post = Activation1d(activation=activation_post)
         else:
@@ -180,7 +179,6 @@ class BigVGAN(torch.nn.Module):
 
         # self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-
     def forward(self, x, mel_ref, lens=None):
         speaker_embedding = self.speaker_encoder(mel_ref, lens)
         n_batch = x.size(0)
@@ -190,7 +188,7 @@ class BigVGAN(torch.nn.Module):
             contrastive_loss = self.cal_clip_loss(spe_emb_chunk1.squeeze(1), spe_emb_chunk2.squeeze(1), self.logit_scale.exp())
 
             speaker_embedding = speaker_embedding[:n_batch, :, :]
-        speaker_embedding = speaker_embedding.transpose(1,2)
+        speaker_embedding = speaker_embedding.transpose(1, 2)
 
         # upsample feat
         if self.feat_upsample:
@@ -265,20 +263,20 @@ class DiscriminatorP(torch.nn.Module):
         self.d_mult = h.discriminator_channel_mult
         norm_f = weight_norm if use_spectral_norm == False else spectral_norm
         self.convs = nn.ModuleList([
-            norm_f(Conv2d(1, int(32*self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(int(32*self.d_mult), int(128*self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(int(128*self.d_mult), int(512*self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(int(512*self.d_mult), int(1024*self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
-            norm_f(Conv2d(int(1024*self.d_mult), int(1024*self.d_mult), (kernel_size, 1), 1, padding=(2, 0))),
+            norm_f(Conv2d(1, int(32 * self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
+            norm_f(Conv2d(int(32 * self.d_mult), int(128 * self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
+            norm_f(Conv2d(int(128 * self.d_mult), int(512 * self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
+            norm_f(Conv2d(int(512 * self.d_mult), int(1024 * self.d_mult), (kernel_size, 1), (stride, 1), padding=(get_padding(5, 1), 0))),
+            norm_f(Conv2d(int(1024 * self.d_mult), int(1024 * self.d_mult), (kernel_size, 1), 1, padding=(2, 0))),
         ])
-        self.conv_post = norm_f(Conv2d(int(1024*self.d_mult), 1, (3, 1), 1, padding=(1, 0)))
+        self.conv_post = norm_f(Conv2d(int(1024 * self.d_mult), 1, (3, 1), 1, padding=(1, 0)))
 
     def forward(self, x):
         fmap = []
 
         # 1d to 2d
         b, c, t = x.shape
-        if t % self.period != 0: # pad first
+        if t % self.period != 0:  # pad first
             n_pad = self.period - (t % self.period)
             x = F.pad(x, (0, n_pad), "reflect")
             t = t + n_pad
@@ -338,11 +336,11 @@ class DiscriminatorR(nn.Module):
             self.d_mult = cfg.mrd_channel_mult
 
         self.convs = nn.ModuleList([
-            norm_f(nn.Conv2d(1, int(32*self.d_mult), (3, 9), padding=(1, 4))),
-            norm_f(nn.Conv2d(int(32*self.d_mult), int(32*self.d_mult), (3, 9), stride=(1, 2), padding=(1, 4))),
-            norm_f(nn.Conv2d(int(32*self.d_mult), int(32*self.d_mult), (3, 9), stride=(1, 2), padding=(1, 4))),
-            norm_f(nn.Conv2d(int(32*self.d_mult), int(32*self.d_mult), (3, 9), stride=(1, 2), padding=(1, 4))),
-            norm_f(nn.Conv2d(int(32*self.d_mult), int(32*self.d_mult), (3, 3), padding=(1, 1))),
+            norm_f(nn.Conv2d(1, int(32 * self.d_mult), (3, 9), padding=(1, 4))),
+            norm_f(nn.Conv2d(int(32 * self.d_mult), int(32 * self.d_mult), (3, 9), stride=(1, 2), padding=(1, 4))),
+            norm_f(nn.Conv2d(int(32 * self.d_mult), int(32 * self.d_mult), (3, 9), stride=(1, 2), padding=(1, 4))),
+            norm_f(nn.Conv2d(int(32 * self.d_mult), int(32 * self.d_mult), (3, 9), stride=(1, 2), padding=(1, 4))),
+            norm_f(nn.Conv2d(int(32 * self.d_mult), int(32 * self.d_mult), (3, 3), padding=(1, 1))),
         ])
         self.conv_post = norm_f(nn.Conv2d(int(32 * self.d_mult), 1, (3, 3), padding=(1, 1)))
 
@@ -367,7 +365,7 @@ class DiscriminatorR(nn.Module):
         x = x.squeeze(1)
         x = torch.stft(x, n_fft=n_fft, hop_length=hop_length, win_length=win_length, center=False, return_complex=True)
         x = torch.view_as_real(x)  # [B, F, TT, 2]
-        mag = torch.norm(x, p=2, dim =-1) #[B, F, TT]
+        mag = torch.norm(x, p=2, dim=-1)  # [B, F, TT]
 
         return mag
 
@@ -376,9 +374,9 @@ class MultiResolutionDiscriminator(nn.Module):
     def __init__(self, cfg, debug=False):
         super().__init__()
         self.resolutions = cfg.resolutions
-        assert len(self.resolutions) == 3,\
+        assert len(self.resolutions) == 3, \
             "MRD requires list of list with len=3, each element having a list with len=3. got {}".\
-                format(self.resolutions)
+            format(self.resolutions)
         self.discriminators = nn.ModuleList(
             [DiscriminatorR(cfg, resolution) for resolution in self.resolutions]
         )
@@ -406,7 +404,7 @@ def feature_loss(fmap_r, fmap_g):
         for rl, gl in zip(dr, dg):
             loss += torch.mean(torch.abs(rl - gl))
 
-    return loss*2
+    return loss * 2
 
 
 def discriminator_loss(disc_real_outputs, disc_generated_outputs):
@@ -414,7 +412,7 @@ def discriminator_loss(disc_real_outputs, disc_generated_outputs):
     r_losses = []
     g_losses = []
     for dr, dg in zip(disc_real_outputs, disc_generated_outputs):
-        r_loss = torch.mean((1-dr)**2)
+        r_loss = torch.mean((1 - dr)**2)
         g_loss = torch.mean(dg**2)
         loss += (r_loss + g_loss)
         r_losses.append(r_loss.item())
@@ -427,9 +425,8 @@ def generator_loss(disc_outputs):
     loss = 0
     gen_losses = []
     for dg in disc_outputs:
-        l = torch.mean((1-dg)**2)
+        l = torch.mean((1 - dg)**2)
         gen_losses.append(l)
         loss += l
 
     return loss, gen_losses
-

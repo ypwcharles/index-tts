@@ -1,7 +1,8 @@
 import torch
 import torchaudio
 from torch import nn
-from utils import safe_log
+
+from indextts.utils.utils import safe_log
 
 
 class FeatureExtractor(nn.Module):
@@ -23,7 +24,7 @@ class FeatureExtractor(nn.Module):
 
 class MelSpectrogramFeatures(FeatureExtractor):
     def __init__(self, sample_rate=24000, n_fft=1024, hop_length=256, win_length=None,
-                    n_mels=100, mel_fmin=0, mel_fmax=None, normalize=False, padding="center"):
+                 n_mels=100, mel_fmin=0, mel_fmax=None, normalize=False, padding="center"):
         super().__init__()
         if padding not in ["center", "same"]:
             raise ValueError("Padding must be 'center' or 'same'.")
