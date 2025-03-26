@@ -87,7 +87,7 @@ class TextNormalizer:
             print("Error, text normalizer is not initialized !!!")
             return ""
         try:
-            normalizer = self.zh_normalizer if self.use_chinese(text) else self.en_normalizer
+            normalizer = self.zh_normalizer if self.use_chinese(replaced_text) else self.en_normalizer
             result = normalizer.normalize(replaced_text)
         except Exception:
             result = ""
