@@ -112,7 +112,7 @@ wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/unigram_12000.vocab
 4. Run test script:
 ```bash
 # Please put your prompt audio in 'test_data' and rename it to 'input.wav'
-python indextts/infer.py
+PYTHONPATH=. python indextts/infer.py
 ```
 #### Web Demo
 ```bash
