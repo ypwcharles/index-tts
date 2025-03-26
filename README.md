@@ -98,7 +98,18 @@ conda activate index-tts
 pip install -r requirements.txt
 apt-get install ffmpeg
 ```
-3. Run test script:
+3. Download models:
+```bash
+mkdir checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/bigvgan_discriminator.pth -P checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/bigvgan_generator.pth -P checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/bpe.model -P checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/config.yaml -P checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/dvae.pth -P checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/gpt.pth -P checkpoints
+wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/unigram_12000.vocab -P checkpoints
+```
+4. Run test script:
 ```bash
 # Please put your prompt audio in 'test_data' and rename it to 'input.wav'
 python indextts/infer.py
