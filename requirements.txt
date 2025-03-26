@@ -21,3 +21,4 @@ pypinyin
 librosa
 gradio
 tqdm
+WeTextProcessing
