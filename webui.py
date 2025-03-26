@@ -10,7 +10,6 @@ sys.path.append(os.path.join(current_dir, "indextts"))
 import gradio as gr
 from indextts.infer import IndexTTS
 from tools.i18n.i18n import I18nAuto
-from utils.webui_utils import next_page, prev_page
 
 i18n = I18nAuto(language="zh_CN")
 MODE = 'local'

@@ -7,7 +7,7 @@ from gpt.conformer.subsampling import Conv2dSubsampling4, Conv2dSubsampling6, \
     Conv2dSubsampling8, LinearNoSubsampling, Conv2dSubsampling2
 from gpt.conformer.embedding import PositionalEncoding, RelPositionalEncoding, NoPositionalEncoding
 from gpt.conformer.attention import MultiHeadedAttention, RelPositionMultiHeadedAttention
-from utils.utils import make_pad_mask
+from utils.common import make_pad_mask
 
 
 class PositionwiseFeedForward(torch.nn.Module):

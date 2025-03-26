@@ -5,7 +5,7 @@ import torch
 import torchaudio
 from omegaconf import OmegaConf
 import sentencepiece as spm
-from utils.utils import tokenize_by_CJK_char
+from utils.common import tokenize_by_CJK_char
 from utils.feature_extractors import MelSpectrogramFeatures
 from indextts.vqvae.xtts_dvae import DiscreteVAE
 from indextts.utils.checkpoint import load_checkpoint
