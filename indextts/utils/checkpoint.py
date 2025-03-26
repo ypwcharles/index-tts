@@ -12,15 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import logging
 import os
 import re
-
-import yaml
-import torch
 from collections import OrderedDict
 
-import datetime
+import torch
+import yaml
 
 
 def load_checkpoint(model: torch.nn.Module, model_pth: str) -> dict:

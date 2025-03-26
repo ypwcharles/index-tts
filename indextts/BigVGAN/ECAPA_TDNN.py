@@ -12,6 +12,7 @@ from indextts.BigVGAN.nnet.CNN import Conv1d as _Conv1d
 from indextts.BigVGAN.nnet.linear import Linear
 from indextts.BigVGAN.nnet.normalization import BatchNorm1d as _BatchNorm1d
 
+
 def length_to_mask(length, max_len=None, dtype=None, device=None):
     """Creates a binary mask for each sequence.
 

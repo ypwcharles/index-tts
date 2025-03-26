@@ -3,13 +3,14 @@
 
 import glob
 import os
+
 import matplotlib
+import matplotlib.pylab as plt
 import torch
+from scipy.io.wavfile import write
 from torch.nn.utils import weight_norm
 
 matplotlib.use("Agg")
-import matplotlib.pylab as plt
-from scipy.io.wavfile import write
 
 MAX_WAV_VALUE = 32768.0
 
