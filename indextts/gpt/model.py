@@ -5,11 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2Config, GPT2PreTrainedModel, LogitsProcessorList
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
-from transformers.utils.model_parallel_utils import get_device_map, assert_device_map
-from gpt.perceiver import PerceiverResampler
-from gpt.conformer_encoder import ConformerEncoder
+from transformers.utils.model_parallel_utils import (assert_device_map,
+                                                     get_device_map)
+
+from indextts.gpt.conformer_encoder import ConformerEncoder
+from indextts.gpt.perceiver import PerceiverResampler
 from indextts.utils.arch_util import AttentionBlock
-from utils.typical_sampling import TypicalLogitsWarper
+from indextts.utils.typical_sampling import TypicalLogitsWarper
 
 
 def null_position_embeddings(range, dim):
@@ -20,14 +22,15 @@ class ResBlock(nn.Module):
     """
     Basic residual convolutional block that uses GroupNorm.
     """
+
     def __init__(self, chan):
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv1d(chan, chan, kernel_size=3, padding=1),
-            nn.GroupNorm(chan//8, chan),
+            nn.GroupNorm(chan // 8, chan),
             nn.ReLU(),
             nn.Conv1d(chan, chan, kernel_size=3, padding=1),
-            nn.GroupNorm(chan//8, chan)
+            nn.GroupNorm(chan // 8, chan)
         )
 
     def forward(self, x):
@@ -229,7 +232,7 @@ class ConditioningEncoder(nn.Module):
             return h.mean(dim=2)
         else:
             return h
-            #return h[:, :, 0]
+            # return h[:, :, 0]
 
 
 class LearnedPositionEmbeddings(nn.Module):
@@ -253,8 +256,8 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
     """
     from transformers import GPT2Config, GPT2Model
     gpt_config = GPT2Config(vocab_size=256,  # Unused.
-                            n_positions=max_mel_seq_len+max_text_seq_len,
-                            n_ctx=max_mel_seq_len+max_text_seq_len,
+                            n_positions=max_mel_seq_len + max_text_seq_len,
+                            n_ctx=max_mel_seq_len + max_text_seq_len,
                             n_embd=model_dim,
                             n_layer=layers,
                             n_head=heads,
@@ -266,7 +269,7 @@ def build_hf_gpt_transformer(layers, model_dim, heads, max_mel_seq_len, max_text
     gpt.wpe = functools.partial(null_position_embeddings, dim=model_dim)
     # Built-in token embeddings are unused.
     del gpt.wte
-    return gpt, LearnedPositionEmbeddings(max_mel_seq_len, model_dim), LearnedPositionEmbeddings(max_text_seq_len, model_dim),\
+    return gpt, LearnedPositionEmbeddings(max_mel_seq_len, model_dim), LearnedPositionEmbeddings(max_text_seq_len, model_dim), \
         None, None
 
 
@@ -274,14 +277,14 @@ class MelEncoder(nn.Module):
     def __init__(self, channels, mel_channels=80, resblocks_per_reduction=2):
         super().__init__()
         self.channels = channels
-        self.encoder = nn.Sequential(nn.Conv1d(mel_channels, channels//4, kernel_size=3, padding=1),
-                                     nn.Sequential(*[ResBlock(channels//4) for _ in range(resblocks_per_reduction)]),
-                                     nn.Conv1d(channels//4, channels//2, kernel_size=3, stride=2, padding=1),
-                                     nn.GroupNorm(channels//16, channels//2),
+        self.encoder = nn.Sequential(nn.Conv1d(mel_channels, channels // 4, kernel_size=3, padding=1),
+                                     nn.Sequential(*[ResBlock(channels // 4) for _ in range(resblocks_per_reduction)]),
+                                     nn.Conv1d(channels // 4, channels // 2, kernel_size=3, stride=2, padding=1),
+                                     nn.GroupNorm(channels // 16, channels // 2),
                                      nn.ReLU(),
-                                     nn.Sequential(*[ResBlock(channels//2) for _ in range(resblocks_per_reduction)]),
-                                     nn.Conv1d(channels//2, channels, kernel_size=3, stride=2, padding=1),
-                                     nn.GroupNorm(channels//8, channels),
+                                     nn.Sequential(*[ResBlock(channels // 2) for _ in range(resblocks_per_reduction)]),
+                                     nn.Conv1d(channels // 2, channels, kernel_size=3, stride=2, padding=1),
+                                     nn.GroupNorm(channels // 8, channels),
                                      nn.ReLU(),
                                      nn.Sequential(*[ResBlock(channels) for _ in range(resblocks_per_reduction)]),
                                      )
@@ -493,7 +496,7 @@ class UnifiedVoice(nn.Module):
             speech_conditioning_input, mask = self.conditioning_encoder(speech_conditioning_input.transpose(1, 2),
                                                                         cond_mel_lengths)  # (b, s, d), (b, 1, s)
             if self.condition_type == "conformer_perceiver":
-                #conds_mask = torch.cat([torch.ones((mask.shape[0], self.cond_num), dtype=torch.bool), mask.squeeze(1)], dim=1)
+                # conds_mask = torch.cat([torch.ones((mask.shape[0], self.cond_num), dtype=torch.bool), mask.squeeze(1)], dim=1)
                 conds_mask = self.cond_mask_pad(mask.squeeze(1))
                 conds = self.perceiver_encoder(speech_conditioning_input, conds_mask)  # (b, 32, d)
         elif self.condition_type == "gst":
@@ -536,7 +539,7 @@ class UnifiedVoice(nn.Module):
         speech_conditioning_latent = self.get_conditioning(speech_conditioning_latent, cond_mel_lengths)
         # Types are expressed by expanding the text embedding space.
         if types is not None:
-            text_inputs = text_inputs * (1+types).unsqueeze(-1)
+            text_inputs = text_inputs * (1 + types).unsqueeze(-1)
 
         if clip_inputs:
             # This model will receive micro-batches with a ton of padding for both the text and MELs. Ameliorate this by
@@ -546,10 +549,10 @@ class UnifiedVoice(nn.Module):
             max_mel_len = wav_lengths.max() // self.mel_length_compression
             mel_codes = mel_codes[:, :max_mel_len]
             if raw_mels is not None:
-                raw_mels = raw_mels[:, :, :max_mel_len*4]
+                raw_mels = raw_mels[:, :, :max_mel_len * 4]
 
         # Set padding areas within MEL (currently it is coded with the MEL code for <zero>).
-        #mel_codes_lengths = torch.div(wav_lengths, self.mel_length_compression, rounding_mode='trunc')
+        # mel_codes_lengths = torch.div(wav_lengths, self.mel_length_compression, rounding_mode='trunc')
         mel_codes_lengths = torch.ceil(wav_lengths / self.mel_length_compression).long() + 1
         mel_codes = self.set_mel_padding(mel_codes, mel_codes_lengths)
 
@@ -569,7 +572,7 @@ class UnifiedVoice(nn.Module):
         mel_emb = mel_emb + self.mel_pos_embedding(mel_codes)
 
         if text_first:
-            #print(f"conds: {conds.shape}, text_emb: {text_emb.shape}, mel_emb: {mel_emb.shape}")
+            # print(f"conds: {conds.shape}, text_emb: {text_emb.shape}, mel_emb: {mel_emb.shape}")
             text_logits, mel_logits = self.get_logits(conds, text_emb, self.text_head, mel_emb, self.mel_head, get_attns=return_attentions, return_latent=return_latent)
             if return_latent:
                 return mel_logits[:, :-2]  # Despite the name, these are not logits. Strip off the two tokens added by this forward pass.
@@ -598,7 +601,7 @@ class UnifiedVoice(nn.Module):
         self.inference_model.store_mel_emb(emb)
 
         # +1 for the start_audio_token
-        fake_inputs = torch.full((emb.shape[0], emb.shape[1]+1,), fill_value=1, dtype=torch.long,
+        fake_inputs = torch.full((emb.shape[0], emb.shape[1] + 1,), fill_value=1, dtype=torch.long,
                                  device=text_inputs.device)
 
         fake_inputs[:, -1] = self.start_mel_token
@@ -619,7 +622,3 @@ class UnifiedVoice(nn.Module):
                                             max_length=max_length, logits_processor=logits_processor,
                                             num_return_sequences=num_return_sequences, **hf_generate_kwargs)
         return gen[:, trunc_index:]
-
-
-
-

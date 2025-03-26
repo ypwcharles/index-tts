@@ -21,6 +21,7 @@ from typing import Tuple, Union
 import torch
 import torch.nn.functional as F
 
+
 class PositionalEncoding(torch.nn.Module):
     """Positional encoding.
 

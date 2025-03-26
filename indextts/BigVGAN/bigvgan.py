@@ -4,23 +4,23 @@
 # Adapted from https://github.com/jik876/hifi-gan under the MIT license.
 #   LICENSE is in incl_licenses directory.
 
-import os
 import json
+import os
 from pathlib import Path
-from typing import Optional, Union, Dict
+from typing import Dict, Optional, Union
 
 import torch
 import torch.nn as nn
+from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
 from torch.nn import Conv1d, ConvTranspose1d
-from torch.nn.utils import weight_norm, remove_weight_norm
+from torch.nn.utils import remove_weight_norm, weight_norm
 
 import indextts.BigVGAN.activations as activations
-from indextts.BigVGAN.utils import init_weights, get_padding
-from indextts.BigVGAN.alias_free_activation.torch.act import Activation1d as TorchActivation1d
-from indextts.BigVGAN.env import AttrDict
-
-from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
+from indextts.BigVGAN.alias_free_activation.torch.act import \
+    Activation1d as TorchActivation1d
 from indextts.BigVGAN.ECAPA_TDNN import ECAPA_TDNN
+from indextts.BigVGAN.env import AttrDict
+from indextts.BigVGAN.utils import get_padding, init_weights
 
 
 def load_hparams_from_json(path) -> AttrDict:
@@ -51,7 +51,7 @@ class AMPBlock1(torch.nn.Module):
         activation: str = None,
     ):
         super().__init__()
-        
+
         self.h = h
 
         self.convs1 = nn.ModuleList(
@@ -94,9 +94,8 @@ class AMPBlock1(torch.nn.Module):
 
         # Select which Activation1d, lazy-load cuda version to ensure backward compatibility
         if self.h.get("use_cuda_kernel", False):
-            from alias_free_activation.cuda.activation1d import (
-                Activation1d as CudaActivation1d,
-            )
+            from alias_free_activation.cuda.activation1d import \
+                Activation1d as CudaActivation1d
 
             Activation1d = CudaActivation1d
         else:
@@ -170,7 +169,7 @@ class AMPBlock2(torch.nn.Module):
         activation: str = None,
     ):
         super().__init__()
-        
+
         self.h = h
 
         self.convs = nn.ModuleList(
@@ -194,9 +193,8 @@ class AMPBlock2(torch.nn.Module):
 
         # Select which Activation1d, lazy-load cuda version to ensure backward compatibility
         if self.h.get("use_cuda_kernel", False):
-            from alias_free_activation.cuda.activation1d import (
-                Activation1d as CudaActivation1d,
-            )
+            from alias_free_activation.cuda.activation1d import \
+                Activation1d as CudaActivation1d
 
             Activation1d = CudaActivation1d
         else:
@@ -241,6 +239,7 @@ class AMPBlock2(torch.nn.Module):
         for l in self.convs:
             remove_weight_norm(l)
 
+
 '''
     PyTorchModelHubMixin,
     library_name="bigvgan",
@@ -250,6 +249,7 @@ class AMPBlock2(torch.nn.Module):
     license="mit",
     tags=["neural-vocoder", "audio-generation", "arxiv:2206.04658"],
 '''
+
 
 class BigVGAN(
     torch.nn.Module,
@@ -274,9 +274,8 @@ class BigVGAN(
 
         # Select which Activation1d, lazy-load cuda version to ensure backward compatibility
         if self.h.get("use_cuda_kernel", False):
-            from alias_free_activation.cuda.activation1d import (
-                Activation1d as CudaActivation1d,
-            )
+            from alias_free_activation.cuda.activation1d import \
+                Activation1d as CudaActivation1d
 
             Activation1d = CudaActivation1d
         else:
