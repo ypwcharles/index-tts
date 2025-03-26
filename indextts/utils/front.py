@@ -76,8 +76,8 @@ class TextNormalizer:
         else:
             from tn.chinese.normalizer import Normalizer as NormalizerZh
             from tn.english.normalizer import Normalizer as NormalizerEn
-            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False)
-            self.en_normalizer = NormalizerEn()
+            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False,overwrite_cache=True)
+            self.en_normalizer = NormalizerEn(overwrite_cache=True)
 
 
     def infer(self, text):
