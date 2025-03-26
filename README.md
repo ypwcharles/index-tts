@@ -1,14 +1,3 @@
----
-title: "IndexTTS: An Industrial-Level Controllable and Efficient Zero-Shot Text-To-Speech System"
-emoji: "🎙"
-colorFrom: "gray"
-colorTo: "pink"
-python_version: "3.10"
-sdk: "gradio"
-sdk_version: "5.23.0"
-app_file: webui.py
-pinned: false
----
 
 <div align="center">
 <img src='assets/index_icon.png' width="250"/>
