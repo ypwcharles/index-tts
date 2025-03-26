@@ -88,7 +88,7 @@ class TextNormalizer:
             return ""
         try:
             normalizer = self.zh_normalizer if self.use_chinese(text) else self.en_normalizer
-            result = normalizer.normalize(text)
+            result = normalizer.normalize(replaced_text)
         except Exception:
             result = ""
             print(traceback.format_exc())
