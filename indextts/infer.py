@@ -14,7 +14,7 @@ from indextts.utils.feature_extractors import MelSpectrogramFeatures
 from indextts.utils.common import tokenize_by_CJK_char
 from indextts.vqvae.xtts_dvae import DiscreteVAE
 
-
+from indextts.utils.front import TextNormalizer
 class IndexTTS:
     def __init__(self, cfg_path='checkpoints/config.yaml', model_dir='checkpoints'):
         self.cfg = OmegaConf.load(cfg_path)
@@ -42,16 +42,20 @@ class IndexTTS:
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.eval()
         print(">> bigvgan weights restored from:", self.bigvgan_path)
+        self.normalizer = TextNormalizer()
+        self.normalizer.load()
+        print(">> TextNormalizer loaded")
 
     def preprocess_text(self, text):
-        chinese_punctuation = "，。！？；：“”‘’（）【】《》"
-        english_punctuation = ",.!?;:\"\"''()[]<>"
-
-        # 创建一个映射字典
-        punctuation_map = str.maketrans(chinese_punctuation, english_punctuation)
+        # chinese_punctuation = "，。！？；：“”‘’（）【】《》"
+        # english_punctuation = ",.!?;:\"\"''()[]<>"
+        #
+        # # 创建一个映射字典
+        # punctuation_map = str.maketrans(chinese_punctuation, english_punctuation)
 
         # 使用translate方法替换标点符号
-        return text.translate(punctuation_map)
+        # return text.translate(punctuation_map)
+        return self.normalizer.infer(text)
 
     def infer(self, audio_prompt, text, output_path):
         text = self.preprocess_text(text)
