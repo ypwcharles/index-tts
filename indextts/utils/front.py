@@ -68,12 +68,17 @@ class TextNormalizer:
     def load(self):
         # print(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         # sys.path.append(model_dir)
+        import platform
+        if platform.machine() == "aarch64":
+            from wetext import Normalizer
+            self.zh_normalizer = Normalizer(remove_erhua=False,lang="zh",operator="tn")
+            self.en_normalizer = Normalizer(lang="en",operator="tn")
+        else:
+            from tn.chinese.normalizer import Normalizer as NormalizerZh
+            from tn.english.normalizer import Normalizer as NormalizerEn
+            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False)
+            self.en_normalizer = NormalizerEn()
 
-        from tn.chinese.normalizer import Normalizer as NormalizerZh
-        from tn.english.normalizer import Normalizer as NormalizerEn
-
-        self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False)
-        self.en_normalizer = NormalizerEn()
 
     def infer(self, text):
         pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))

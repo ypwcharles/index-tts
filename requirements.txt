@@ -21,4 +21,5 @@ pypinyin
 librosa
 gradio
 tqdm
-WeTextProcessing
+WeTextProcessing # arm机器如果安装失败，请注释此行
+wetext
