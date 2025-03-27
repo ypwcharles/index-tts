@@ -2,7 +2,6 @@
 import traceback
 import re
 
-
 class TextNormalizer:
     def __init__(self):
         # self.normalizer = Normalizer(cache_dir="textprocessing/tn")
@@ -73,7 +72,6 @@ class TextNormalizer:
             from tn.english.normalizer import Normalizer as NormalizerEn
             self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False,overwrite_cache=True)
             self.en_normalizer = NormalizerEn(overwrite_cache=True)
-
 
     def infer(self, text):
         pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
@@ -160,7 +158,6 @@ class TextNormalizer:
         restored_text = self.pinyin_match(restored_text)
 
         return restored_text
-
 
 
 if __name__ == '__main__':
