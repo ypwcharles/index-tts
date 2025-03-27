@@ -58,7 +58,10 @@ class IndexTTS:
         return self.normalizer.infer(text)
 
     def infer(self, audio_prompt, text, output_path):
+        print(f"origin text:{text}")
         text = self.preprocess_text(text)
+        print(f"normalized text:{text}")
+
 
         audio, sr = torchaudio.load(audio_prompt)
         audio = torch.mean(audio, dim=0, keepdim=True)

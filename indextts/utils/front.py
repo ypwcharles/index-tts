@@ -1,12 +1,6 @@
 # -*- coding: utf-8 -*-
 import traceback
-import os
-import sys
 import re
-import re
-
-
-
 
 class TextNormalizer:
     def __init__(self):
@@ -69,16 +63,15 @@ class TextNormalizer:
         # print(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
         # sys.path.append(model_dir)
         import platform
-        if platform.machine() == "aarch64":
+        if platform.system() == "Darwin":
             from wetext import Normalizer
             self.zh_normalizer = Normalizer(remove_erhua=False,lang="zh",operator="tn")
             self.en_normalizer = Normalizer(lang="en",operator="tn")
         else:
             from tn.chinese.normalizer import Normalizer as NormalizerZh
             from tn.english.normalizer import Normalizer as NormalizerEn
-            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False)
-            self.en_normalizer = NormalizerEn()
-
+            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False,overwrite_cache=True)
+            self.en_normalizer = NormalizerEn(overwrite_cache=True)
 
     def infer(self, text):
         pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
@@ -92,7 +85,79 @@ class TextNormalizer:
         except Exception:
             result = ""
             print(traceback.format_exc())
+        result = self.restore_pinyin_tone_numbers(replaced_text, result)
         return result
+
+    def pinyin_match(self, pinyin):
+        pattern = r"(qun)(\d)"
+        repl = r"qvn\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(quan)(\d)"
+        repl = r"qvan\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(que)(\d)"
+        repl = r"qve\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(qu)(\d)"
+        repl = r"qv\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(ju)(\d)"
+        repl = r"jv\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(jue)(\d)"
+        repl = r"jve\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(xun)(\d)"
+        repl = r"xvn\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(xue)(\d)"
+        repl = r"xve\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(xu)(\d)"
+        repl = r"xv\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(juan)(\d)"
+        repl = r"jvan\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(jun)(\d)"
+        repl = r"jvn\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+
+        pattern = r"(xuan)(\d)"
+        repl = r"xvan\g<2>"
+        pinyin = re.sub(pattern, repl, pinyin)
+        return pinyin
+
+    def restore_pinyin_tone_numbers(self,original_text, processed_text):
+        # 第一步：恢复拼音后的音调数字（1-4）
+        # 建立中文数字到阿拉伯数字的映射
+        chinese_to_num = {'一': '1', '二': '2', '三': '3', '四': '4'}
+
+        # 使用正则表达式找到拼音+中文数字的组合（如 "xuan四"）
+        def replace_tone(match):
+            pinyin = match.group(1)  # 拼音部分
+            chinese_num = match.group(2)  # 中文数字部分
+            # 将中文数字转换为阿拉伯数字
+            num = chinese_to_num.get(chinese_num, chinese_num)
+            return f"{pinyin}{num}"
+
+        # 匹配拼音后跟中文数字（一、二、三、四）的情况
+        pattern = r'([a-zA-Z]+)([一二三四])'
+        restored_text = re.sub(pattern, replace_tone, processed_text)
+        restored_text = restored_text.lower()
+        restored_text = self.pinyin_match(restored_text)
+
+        return restored_text
 
 
 if __name__ == '__main__':
