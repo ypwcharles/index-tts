@@ -74,7 +74,7 @@ class IndexTTS:
         auto_conditioning = cond_mel
 
         tokenizer = spm.SentencePieceProcessor()
-        tokenizer.load(self.cfg.dataset['bpe_model'])
+        tokenizer.load(os.path.join(self.model_dir,self.cfg.dataset['bpe_model']))
 
         punctuation = ["!", "?", ".", ";", "！", "？", "。", "；"]
         pattern = r"(?<=[{0}])\s*".format("".join(punctuation))
