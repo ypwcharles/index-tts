@@ -105,11 +105,9 @@ apt-get install ffmpeg
 ```
 3. Download models:
 ```bash
-mkdir checkpoints
 wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/bigvgan_discriminator.pth -P checkpoints
 wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/bigvgan_generator.pth -P checkpoints
 wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/bpe.model -P checkpoints
-wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/config.yaml -P checkpoints
 wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/dvae.pth -P checkpoints
 wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/gpt.pth -P checkpoints
 wget https://huggingface.co/IndexTeam/Index-TTS/resolve/main/unigram_12000.vocab -P checkpoints
