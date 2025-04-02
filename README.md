@@ -11,12 +11,20 @@
 
 ## 👉🏻 IndexTTS 👈🏻
 
-[[HuggingFace Demo]](https://huggingface.co/spaces/IndexTeam/IndexTTS) [[Paper]](https://arxiv.org/abs/2502.05512)  [[Demos]](https://index-tts.github.io)  
+[[HuggingFace Demo]](https://huggingface.co/spaces/IndexTeam/IndexTTS)   [[ModelScope Demo]](https://modelscope.cn/studios/IndexTeam/IndexTTS-Demo) \
+[[Paper]](https://arxiv.org/abs/2502.05512)  [[Demos]](https://index-tts.github.io)  
 
 **IndexTTS** is a GPT-style text-to-speech (TTS) model mainly based on XTTS and Tortoise. It is capable of correcting the pronunciation of Chinese characters using pinyin and controlling pauses at any position through punctuation marks. We enhanced multiple modules of the system, including the improvement of speaker condition feature representation, and the integration of BigVGAN2 to optimize audio quality. Trained on tens of thousands of hours of data, our system achieves state-of-the-art performance, outperforming current popular TTS systems such as XTTS, CosyVoice2, Fish-Speech, and F5-TTS.
 <span style="font-size:16px;">  
 Experience **IndexTTS**: Please contact <u>xuanwu@bilibili.com</u> for more detailed information. </span>
+### Contact
+QQ群：553460296 \
+Discord：https://discord.gg/uT32E7KDmy  \
+欢迎大家来交流讨论！
+## 📣 Updates
 
+- `2025/03/25` 🔥🔥 We release the model parameters and inference code.
+- `2025/02/12` 🔥 We submitted our paper on arXiv, and released our demos and test sets.
 
 ## 🖥️ Method
 
@@ -32,15 +40,12 @@ The main improvements and contributions are summarized as follows:
  - **IndexTTS** incorporate a conformer conditioning encoder and a BigVGAN2-based speechcode decoder. This improves training stability, voice timbre similarity, and sound quality.
  - We release all test sets here, including those for polysyllabic words, subjective and objective test sets.
 
-## 📣 Updates
 
-- `2025/03/25` 🔥🔥 We release the model parameters and inference code.
-- `2025/02/12` 🔥 We submitted our paper on arXiv, and released our demos and test sets.
 
 ## Model Download
-| **HuggingFace**                                          |
-|----------------------------------------------------------|
-| [😁IndexTTS](https://huggingface.co/IndexTeam/Index-TTS) |
+| **HuggingFace**                                          | **ModelScope** |
+|----------------------------------------------------------|----------------------------------------------------------|
+| [😁IndexTTS](https://huggingface.co/IndexTeam/Index-TTS) | [IndexTTS](https://modelscope.cn/models/IndexTeam/Index-TTS) |
 
 
 ## 📑 Evaluation
