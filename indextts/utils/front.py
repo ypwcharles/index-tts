@@ -70,8 +70,8 @@ class TextNormalizer:
         else:
             from tn.chinese.normalizer import Normalizer as NormalizerZh
             from tn.english.normalizer import Normalizer as NormalizerEn
-            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False,overwrite_cache=True)
-            self.en_normalizer = NormalizerEn(overwrite_cache=True)
+            self.zh_normalizer = NormalizerZh(remove_interjections=False, remove_erhua=False,overwrite_cache=False)
+            self.en_normalizer = NormalizerEn(overwrite_cache=False)
 
     def infer(self, text):
         pattern = re.compile("|".join(re.escape(p) for p in self.char_rep_map.keys()))
