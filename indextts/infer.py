@@ -20,6 +20,7 @@ class IndexTTS:
         self.cfg = OmegaConf.load(cfg_path)
         self.device = 'cuda:0'
         self.model_dir = model_dir
+        self.stop_mel_token = self.cfg.gpt.stop_mel_token
         self.dvae = DiscreteVAE(**self.cfg.vqvae)
         self.dvae_path = os.path.join(self.model_dir, self.cfg.dvae_checkpoint)
         load_checkpoint(self.dvae, self.dvae_path)
