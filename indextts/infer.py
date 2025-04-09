@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import time
 
 import sentencepiece as spm
 import torch
@@ -22,6 +21,7 @@ class IndexTTS:
         self.device = 'cuda:0'
         self.model_dir = model_dir
         self.is_fp16 = is_fp16
+        self.stop_mel_token = self.cfg.gpt.stop_mel_token
         if self.is_fp16:
             self.dtype = torch.float16
         else:
@@ -57,6 +57,7 @@ class IndexTTS:
         self.bigvgan = self.bigvgan.to(self.device)
         self.bigvgan.eval()
         print(">> bigvgan weights restored from:", self.bigvgan_path)
+        self.bpe_path = os.path.join(self.model_dir, self.cfg.dataset['bpe_model'])
         self.normalizer = TextNormalizer()
         self.normalizer.load()
         print(">> TextNormalizer loaded")
@@ -71,6 +72,40 @@ class IndexTTS:
         # 使用translate方法替换标点符号
         # return text.translate(punctuation_map)
         return self.normalizer.infer(text)
+
+    def remove_long_silence(self, codes):
+        code_lens = []
+        for i in range(0, codes.shape[0]):
+            code = codes[i]
+            if self.cfg.gpt.stop_mel_token not in code:
+                code_lens.append(len(code))
+                len_ = len(code)
+            else:
+                # len_ = code.cpu().tolist().index(8193)+1
+                len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0] + 1
+                len_ = len_ - 2
+
+            count = torch.sum(code == 52).item()
+            if count > 50:
+                code = code.cpu().tolist()
+                ncode = []
+                n = 0
+                for k in range(0, len_):
+                    if code[k] != 52:
+                        ncode.append(code[k])
+                        n = 0
+                    elif code[k] == 52 and n < 30:
+                        ncode.append(code[k])
+                        n += 1
+                    # if (k == 0 and code[k] == 52) or (code[k] == 52 and code[k-1] == 52):
+                    #    n += 1
+                len_ = len(ncode)
+                ncode = torch.LongTensor(ncode)
+                codes[i] = self.stop_mel_token
+                codes[i, 0:len_] = ncode
+            code_lens.append(len_)
+        code_lens = torch.LongTensor(code_lens).cuda()
+        return codes, code_lens
 
     def infer(self, audio_prompt, text, output_path):
         print(f"origin text:{text}")
@@ -89,7 +124,7 @@ class IndexTTS:
         auto_conditioning = cond_mel
 
         tokenizer = spm.SentencePieceProcessor()
-        tokenizer.load(os.path.join(self.model_dir,self.cfg.dataset['bpe_model']))
+        tokenizer.load(self.bpe_path)
 
         punctuation = ["!", "?", ".", ";", "！", "？", "。", "；"]
         pattern = r"(?<=[{0}])\s*".format("".join(punctuation))
@@ -162,6 +197,12 @@ class IndexTTS:
                 print(codes, type(codes))
                 print(f"codes shape: {codes.shape}, codes type: {codes.dtype}")
                 codes = codes[:, :-2]
+                # code_lens = torch.tensor([codes.shape[-1]])
+                print(codes)
+                print(f"codes shape: {codes.shape}")
+                # remove ultra-long silence if exits
+                codes, code_lens = self.remove_long_silence(codes)
+                print(f"codes shape: {codes.shape}")
 
                 # latent, text_lens_out, code_lens_out = \
                 if self.is_fp16:
@@ -169,25 +210,20 @@ class IndexTTS:
                         latent = \
                             self.gpt(auto_conditioning, text_tokens,
                                      torch.tensor([text_tokens.shape[-1]], device=text_tokens.device), codes,
-                                     torch.tensor([codes.shape[-1] * self.gpt.mel_length_compression], device=text_tokens.device),
+                                     code_lens*self.gpt.mel_length_compression,
                                      cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]], device=text_tokens.device),
                                      return_latent=True, clip_inputs=False)
                         latent = latent.transpose(1, 2)
-                        print(f'latent shape: {latent.shape}, latent type: {latent.dtype}')
-                        print(f'auto_conditioning shape: {auto_conditioning.shape}, auto_conditioning type: {auto_conditioning.dtype}')
-                        fp16_auto_conditioning = auto_conditioning.half()
-                        wav, _ = self.bigvgan(latent.transpose(1, 2), fp16_auto_conditioning.transpose(1, 2))
+                        wav, _ = self.bigvgan(latent.transpose(1, 2), auto_conditioning.transpose(1, 2))
                         wav = wav.squeeze(1).cpu()
 
                 else:
                     latent = \
                         self.gpt(auto_conditioning, text_tokens,
                                  torch.tensor([text_tokens.shape[-1]], device=text_tokens.device), codes,
-                                 torch.tensor([codes.shape[-1] * self.gpt.mel_length_compression], device=text_tokens.device),
+                                 code_lens*self.gpt.mel_length_compression,
                                  cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]], device=text_tokens.device),
                                  return_latent=True, clip_inputs=False)
-                    print(f'latent shape: {latent.shape}, latent type: {latent.dtype}')
-                    print(f'auto_conditioning: {auto_conditioning.shape}, auto_conditioning: {auto_conditioning.dtype}')
                     latent = latent.transpose(1, 2)
                     '''
                     latent_list = []
@@ -212,6 +248,8 @@ class IndexTTS:
 
 
 if __name__ == "__main__":
+    prompt_wav="test_data/input.wav"
+    #text="晕 XUAN4 是 一 种 GAN3 觉"
+    text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！'
     tts = IndexTTS(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", is_fp16=True)
-    tts.infer(audio_prompt='test_data/input.wav', text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！', output_path="gen.wav")
-
+    tts.infer(audio_prompt=prompt_wav, text=text, output_path="gen.wav")
