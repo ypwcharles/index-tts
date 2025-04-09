@@ -260,7 +260,6 @@ class IndexTTS:
 
 if __name__ == "__main__":
     prompt_wav="test_data/input.wav"
-    prompt_wav="/juicefs/users/wd007/work2024/tts/xtts2/bigvgan/emilia_2503_v1/test/spk_1744181067_1.wav"
     #text="晕 XUAN4 是 一 种 GAN3 觉"
     #text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！'
     text="There is a vehicle arriving in dock number 7?"
