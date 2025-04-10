@@ -111,9 +111,9 @@ class IndexTTS:
             else:
                 codes_list.append(codes[i])
             code_lens.append(len_)
+
+        codes = pad_sequence(codes_list, batch_first=True) if isfix else codes[:, :-2]
         code_lens = torch.LongTensor(code_lens).cuda()
-        if isfix:
-            codes = pad_sequence(codes_list, batch_first=True)
         return codes, code_lens
 
     def infer(self, audio_prompt, text, output_path):
@@ -212,7 +212,7 @@ class IndexTTS:
                 # temporarily fix the long silence bug.
                 codes, code_lens = self.remove_long_silence(codes, silent_token=52, max_consecutive=30)
                 print(codes, type(codes))
-                print(f"codes shape: {codes.shape}, codes type: {codes.dtype}")
+                print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
                 print(f"code len: {code_lens}")
 
                 # latent, text_lens_out, code_lens_out = \
@@ -260,6 +260,7 @@ class IndexTTS:
 
 if __name__ == "__main__":
     prompt_wav="test_data/input.wav"
+    prompt_wav="testwav/spk_1744181067_1.wav"
     #text="晕 XUAN4 是 一 种 GAN3 觉"
     #text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！'
     text="There is a vehicle arriving in dock number 7?"
