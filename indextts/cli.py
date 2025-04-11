@@ -14,8 +14,12 @@ def main():
     parser.add_argument("--model_dir", type=str, default="checkpoints", help="Path to the model directory. Default is 'checkpoints'")
     parser.add_argument("--fp16", action="store_true", default=True, help="Use FP16 for inference if available")
     parser.add_argument("-f", "--force", action="store_true", default=False, help="Force to overwrite the output file if it exists")
+    parser.add_argument("-d", "--device", type=str, default=None, help="Device to run the model on (cpu, cuda, mps)." )
     args = parser.parse_args()
-
+    if len(args.text.strip()) == 0:
+        print("ERROR: Text is empty.")
+        parser.print_help()
+        sys.exit(1)
     if not os.path.exists(args.voice):
         print(f"Audio prompt file {args.voice} does not exist.")
         parser.print_help()
@@ -33,19 +37,26 @@ def main():
             sys.exit(1)
         else:
             os.remove(output_path)
-
+    
     try:
         import torch
-        if not torch.cuda.is_available():
-            print("WARNING: CUDA is not available. Running on CPU may be slow.")
     except ImportError:
         print("ERROR: PyTorch is not installed. Please install it first.")
         sys.exit(1)
-            
+
+    if args.device is None:
+        if torch.cuda.is_available():
+            args.device = "cuda:0"
+        elif torch.mps.is_available():
+            args.device = "mps"
+        else:
+            args.device = "cpu"
+            args.fp16 = False # Disable FP16 on CPU
+            print("WARNING: Running on CPU may be slow.")
 
     from indextts.infer import IndexTTS
-    tts = IndexTTS(cfg_path=args.config, model_dir=args.model_dir, is_fp16=args.fp16)
-    tts.infer(audio_prompt=args.voice, text=args.text, output_path=output_path)
+    tts = IndexTTS(cfg_path=args.config, model_dir=args.model_dir, is_fp16=args.fp16, device=args.device)
+    tts.infer(audio_prompt=args.voice, text=args.text.strip(), output_path=output_path)
 
 if __name__ == "__main__":
     main()

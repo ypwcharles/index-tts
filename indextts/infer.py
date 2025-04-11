@@ -17,16 +17,29 @@ from indextts.vqvae.xtts_dvae import DiscreteVAE
 from indextts.utils.front import TextNormalizer
 
 class IndexTTS:
-    def __init__(self, cfg_path='checkpoints/config.yaml', model_dir='checkpoints', is_fp16=True):
-        self.cfg = OmegaConf.load(cfg_path)
-        if torch.cuda.is_available():
+    def __init__(self, cfg_path='checkpoints/config.yaml', model_dir='checkpoints', is_fp16=True, device=None):
+        """
+        Args:
+            cfg_path (str): path to the config file.
+            model_dir (str): path to the model directory.
+            is_fp16 (bool): whether to use fp16.
+            device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
+        """
+        if device is not None:
+            self.device = device
+            self.is_fp16 = False if device == 'cpu' else is_fp16
+        elif torch.cuda.is_available():
             self.device = 'cuda:0'
+            self.is_fp16 = is_fp16
+        elif torch.mps.is_available():
+            self.device = 'mps'
             self.is_fp16 = is_fp16
         else:
             self.device = 'cpu'
             self.is_fp16 = False
             print(">> Be patient, it may take a while to run in CPU mode.")
 
+        self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
         self.dtype = torch.float16 if self.is_fp16 else None
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
