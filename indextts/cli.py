@@ -37,7 +37,7 @@ def main():
     try:
         import torch
         if not torch.cuda.is_available():
-            print("WARNING: CUDA is not available. Running in CPU mode.")
+            print("WARNING: CUDA is not available. Running on CPU may be slow.")
     except ImportError:
         print("ERROR: PyTorch is not installed. Please install it first.")
         sys.exit(1)
