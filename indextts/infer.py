@@ -1,6 +1,8 @@
 import os
 import re
 import time
+from subprocess import CalledProcessError
+
 import sentencepiece as spm
 import torch
 import torchaudio
@@ -63,7 +65,14 @@ class IndexTTS:
             self.gpt.eval()
         print(">> GPT weights restored from:", self.gpt_path)
         if self.is_fp16:
-            self.gpt.post_init_gpt2_config(use_deepspeed=True, kv_cache=True, half=True)
+            try:
+                import deepspeed
+                use_deepspeed = True
+            except (ImportError, OSError,CalledProcessError) as e:
+                use_deepspeed = False
+                print(f">> DeepSpeed加载失败，回退到标准推理: {e}")
+
+            self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=True)
         else:
             self.gpt.post_init_gpt2_config(use_deepspeed=False, kv_cache=False, half=False)
 
@@ -148,7 +157,7 @@ class IndexTTS:
             sentence.strip() for sentence in sentences if sentence.strip() and sentence.strip() not in {"'", ".", ","}
         ]
 
-    def infer(self, audio_prompt, text, output_path):
+    def infer(self, audio_prompt, text, output_path,verbose=False):
         print(f"origin text:{text}")
         text = self.preprocess_text(text)
         print(f"normalized text:{text}")
@@ -260,7 +269,6 @@ class IndexTTS:
 
 if __name__ == "__main__":
     prompt_wav="test_data/input.wav"
-    prompt_wav="testwav/spk_1744181067_1.wav"
     #text="晕 XUAN4 是 一 种 GAN3 觉"
     #text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！'
     text="There is a vehicle arriving in dock number 7?"
