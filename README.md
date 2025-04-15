@@ -109,11 +109,14 @@ apt-get install ffmpeg
 Download by `huggingface-cli`:
 
 ```bash
-# 如果下载速度慢，可以使用官方的镜像
-export HF_ENDPOINT="https://hf-mirror.com"
 huggingface-cli download IndexTeam/Index-TTS \
   bigvgan_discriminator.pth bigvgan_generator.pth bpe.model dvae.pth gpt.pth unigram_12000.vocab \
   --local-dir checkpoints
+```
+
+Recommended for China users. 如果下载速度慢，可以使用镜像：
+```bash
+export HF_ENDPOINT="https://hf-mirror.com"
 ```
 
 Or by `wget`:
@@ -154,9 +157,24 @@ indextts --help
 
 #### Web Demo
 ```bash
+pip install -e ".[webui]"
 python webui.py
 ```
 Open your browser and visit `http://127.0.0.1:7860` to see the demo.
+
+#### Note for Windows Users
+
+On Windows, you may encounter [an error](https://github.com/index-tts/index-tts/issues/61) when installing `pynini`:
+`ERROR: Failed building wheel for pynini`
+
+In this case, please install `pynini` via `conda`:
+
+```bash
+# after conda activate index-tts
+conda install -c conda-forge pynini==2.1.5
+pip install WeTextProcessing==1.0.3
+pip install -e ".[webui]"
+```
 
 #### Sample Code
 ```python

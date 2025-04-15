@@ -16,7 +16,7 @@ setup(
     packages=find_packages(),
     include_package_data=True,
     install_requires=[
-        "torch==2.6.0",
+        "torch>=2.1.2",
         "torchaudio",
         "transformers==4.36.2",
         "accelerate",
