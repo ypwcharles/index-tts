@@ -214,6 +214,9 @@ class IndexTTS:
         # lang = "EN"
         # lang = "ZH"
         wavs = []
+        gpt_gen_time = 0
+        gpt_forward_time = 0
+        bigvgan_time = 0
 
         for sent in sentences:
             # sent = " ".join([char for char in sent.upper()]) if lang == "ZH" else sent.upper()
@@ -236,6 +239,7 @@ class IndexTTS:
             # text_len = torch.IntTensor([text_tokens.size(1)], device=text_tokens.device)
             # print(text_len)
 
+            m_start_time = time.perf_counter()
             with torch.no_grad():
                 with torch.amp.autocast(self.device, enabled=self.dtype is not None, dtype=self.dtype):
                     codes = self.gpt.inference_speech(auto_conditioning, text_tokens,
@@ -251,6 +255,7 @@ class IndexTTS:
                                                         num_beams=num_beams,
                                                         repetition_penalty=repetition_penalty,
                                                         max_generate_length=max_mel_tokens)
+                gpt_gen_time += time.perf_counter() - m_start_time
                 #codes = codes[:, :-2]
                 code_lens = torch.tensor([codes.shape[-1]], device=codes.device, dtype=codes.dtype)
                 if verbose:
@@ -266,6 +271,7 @@ class IndexTTS:
                     print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
                     print(f"code len: {code_lens}")
 
+                m_start_time = time.perf_counter()
                 # latent, text_lens_out, code_lens_out = \
                 with torch.amp.autocast(self.device, enabled=self.dtype is not None, dtype=self.dtype):
                     latent = \
@@ -274,7 +280,11 @@ class IndexTTS:
                                     code_lens*self.gpt.mel_length_compression,
                                     cond_mel_lengths=torch.tensor([auto_conditioning.shape[-1]], device=text_tokens.device),
                                     return_latent=True, clip_inputs=False)
+                    gpt_forward_time += time.perf_counter() - m_start_time
+
+                    m_start_time = time.perf_counter()
                     wav, _ = self.bigvgan(latent, auto_conditioning.transpose(1, 2))
+                    bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
 
                 wav = torch.clamp(32767 * wav, -32767.0, 32767.0)
@@ -285,7 +295,10 @@ class IndexTTS:
 
         wav = torch.cat(wavs, dim=1)
         wav_length = wav.shape[-1] / sampling_rate
-        print(f">> Reference audio length: {cond_mel_frame / sampling_rate:.2f} seconds")
+        print(f">> Reference audio length: {cond_mel_frame*256 / sampling_rate:.2f} seconds")
+        print(f">> gpt_gen_time: {gpt_gen_time:.2f} seconds")
+        print(f">> gpt_forward_time: {gpt_forward_time:.2f} seconds")
+        print(f">> bigvgan_time: {bigvgan_time:.2f} seconds")
         print(f">> Total inference time: {end_time - start_time:.2f} seconds")
         print(f">> Generated audio length: {wav_length:.2f} seconds")
         print(f">> RTF: {(end_time - start_time) / wav_length:.4f}")
@@ -295,11 +308,11 @@ class IndexTTS:
 
 
 if __name__ == "__main__":
-    prompt_wav = "test_data/input.wav"
+    prompt_wav = "testwav/input.wav"
     prompt_wav = "testwav/spk_1744181067_1.wav"
-    # text="晕 XUAN4 是 一 种 GAN3 觉"
-    # text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！'
+    text="晕 XUAN4 是 一 种 GAN3 觉"
     text = "There is a vehicle arriving in dock number 7?"
+    text='大家好，我现在正在bilibili 体验 ai 科技，说实话，来之前我绝对想不到！AI技术已经发展到这样匪夷所思的地步了！'
 
-    tts = IndexTTS(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", is_fp16=True)
+    tts = IndexTTS(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", is_fp16=True, use_cuda_kernel=False)
     tts.infer(audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
