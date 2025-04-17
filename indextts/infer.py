@@ -110,6 +110,9 @@ class IndexTTS:
         self.normalizer = TextNormalizer()
         self.normalizer.load()
         print(">> TextNormalizer loaded")
+        # 缓存参考音频mel：
+        self.cache_audio_prompt = None
+        self.cache_cond_mel = None
 
     def preprocess_text(self, text):
         # chinese_punctuation = "，。！？；：“”‘’（）【】《》"
@@ -186,15 +189,26 @@ class IndexTTS:
         normalized_text = self.preprocess_text(text)
         print(f"normalized text:{normalized_text}")
 
-        audio, sr = torchaudio.load(audio_prompt)
-        audio = torch.mean(audio, dim=0, keepdim=True)
-        if audio.shape[0] > 1:
-            audio = audio[0].unsqueeze(0)
-        audio = torchaudio.transforms.Resample(sr, 24000)(audio)
-        cond_mel = MelSpectrogramFeatures()(audio).to(self.device)
-        cond_mel_frame = cond_mel.shape[-1]
-        if verbose:
-            print(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
+
+        # 如果参考音频改变了，才需要重新生成 cond_mel, 提升速度
+        if self.cache_cond_mel is None or self.cache_audio_prompt != audio_prompt:
+            audio, sr = torchaudio.load(audio_prompt)
+            audio = torch.mean(audio, dim=0, keepdim=True)
+            if audio.shape[0] > 1:
+                audio = audio[0].unsqueeze(0)
+            audio = torchaudio.transforms.Resample(sr, 24000)(audio)
+            cond_mel = MelSpectrogramFeatures()(audio).to(self.device)
+            cond_mel_frame = cond_mel.shape[-1]
+            if verbose:
+                print(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
+            
+            self.cache_audio_prompt = audio_prompt
+            self.cache_cond_mel = cond_mel
+        else:
+            cond_mel = self.cache_cond_mel
+            cond_mel_frame = cond_mel.shape[-1]
+            pass
+        
 
         auto_conditioning = cond_mel
 
