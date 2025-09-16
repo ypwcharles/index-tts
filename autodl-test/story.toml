@@ -1,0 +1,20 @@
+# F5TTS_v1_Base | E2TTS_Base
+model = "F5TTS_v1_Base"
+ref_audio = "/root/autodl-fs/main.flac"
+# If an empty "", transcribes the reference audio automatically.
+ref_text = ""
+gen_text = ""
+# File with text to generate. Ignores the text above.
+gen_file = "/root/autodl-fs/whitehouse.txt"
+remove_silence = true
+output_dir = "/root/autodl-fs"
+output_file = "whitehouse.mp3"
+output_subtitle_file = "subtitle-whitehouse.json"
+
+[voices.speaker1]
+ref_audio = "/root/autodl-fs/speaker1.MP3"
+ref_text = ""
+
+[voices.speaker2]
+ref_audio = "/root/autodl-fs/speaker2.MP3"
+ref_text = ""
