@@ -31,6 +31,7 @@ class RemotePaths:
     output_dir: str
     output_file: str
     subtitle_file: Optional[str]
+    log_path: str
     timestamp: str
 
 
@@ -109,7 +110,11 @@ def load_config(path: Path) -> Dict:
         return tomllib.load(handle)
 
 
-def resolve_voices(template: Dict, cli_overrides: Sequence[str]) -> Dict[str, Path]:
+def resolve_voices(
+    template: Dict,
+    cli_overrides: Sequence[str],
+    source_dir: Optional[Path] = None,
+) -> Dict[str, Path]:
     voices = template.get("voices") or {}
     if not voices:
         raise ValueError("配置文件中未定义 voices。")
@@ -120,6 +125,7 @@ def resolve_voices(template: Dict, cli_overrides: Sequence[str]) -> Dict[str, Pa
         name, raw_path = item.split("=", 1)
         overrides[name.strip()] = Path(raw_path.strip()).expanduser().resolve()
     result: Dict[str, Path] = {}
+    audio_exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".WAV", ".MP3", ".FLAC", ".M4A", ".OGG")
     for name, params in voices.items():
         default_path = Path(params.get("ref_audio", "")).expanduser()
         default_candidate: Optional[Path] = None
@@ -127,10 +133,31 @@ def resolve_voices(template: Dict, cli_overrides: Sequence[str]) -> Dict[str, Pa
             default_candidate = default_path
         elif Path("autodl-test").joinpath(f"{name}.wav").is_file():
             default_candidate = Path("autodl-test") / f"{name}.wav"
-        prompt_default = overrides.get(name, default_candidate)
-        prompt_default_str = str(prompt_default) if prompt_default else ""
+        elif source_dir:
+            candidates: List[Path] = []
+            remote_hint = params.get("ref_audio")
+            if remote_hint:
+                candidates.append(source_dir / Path(remote_hint).name)
+            for ext in audio_exts:
+                candidates.append(source_dir / f"{name}{ext}")
+            candidates.extend(source_dir.glob(f"{name}.*"))
+            for cand in candidates:
+                if cand.is_file():
+                    default_candidate = cand
+                    break
+        if name in overrides:
+            selected = overrides[name]
+            if not selected.is_file():
+                raise FileNotFoundError(f"覆盖的说话人音频不存在: {selected}")
+            result[name] = selected
+            print(f"使用 CLI 指定的 {name}: {selected}")
+            continue
+        if default_candidate and default_candidate.is_file():
+            result[name] = default_candidate.resolve()
+            print(f"自动匹配到说话人 {name} 的音频: {result[name]}")
+            continue
         while True:
-            raw = prompt(f"说话人 {name} 的本地音频路径", prompt_default_str or None)
+            raw = prompt(f"说话人 {name} 的本地音频路径", None)
             candidate = Path(raw).expanduser().resolve()
             if candidate.is_file():
                 result[name] = candidate
@@ -139,16 +166,33 @@ def resolve_voices(template: Dict, cli_overrides: Sequence[str]) -> Dict[str, Pa
     return result
 
 
-def resolve_text_path(template: Dict, cli_path: Optional[str]) -> Tuple[Path, bool]:
-    default_candidates = [cli_path]
+def resolve_text_path(
+    template: Dict,
+    cli_path: Optional[str],
+    source_dir: Optional[Path] = None,
+) -> Tuple[Path, bool]:
+    default_candidates = []
+    if cli_path:
+        default_candidates.append(cli_path)
     template_file = template.get("gen_file")
     if template_file:
+        template_candidate = Path(template_file)
+        if not template_candidate.is_absolute() and source_dir:
+            default_candidates.append(str((source_dir / template_candidate).resolve()))
         default_candidates.append(template_file)
+    if source_dir:
+        default_candidates.append(str((source_dir / f"{source_dir.name}.txt").resolve()))
+        for txt_file in source_dir.glob("*.txt"):
+            default_candidates.append(str(txt_file.resolve()))
     default_candidates.append("autodl-test/bsta.txt")
     default_path = next((p for p in default_candidates if p and Path(p).expanduser().is_file()), None)
+    if default_path:
+        resolved = Path(default_path).expanduser().resolve()
+        print(f"自动匹配到文本文件: {resolved}")
+        return resolved, False
 
     while True:
-        raw = prompt("请输入要合成的文本文件路径", default_path)
+        raw = prompt("请输入要合成的文本文件路径", None)
         raw_path = Path(raw).expanduser().resolve()
         if raw_path.is_file():
             return raw_path, False
@@ -306,15 +350,20 @@ def download_file(sftp: paramiko.SFTPClient, remote_path: str, local_path: Path)
     sftp.get(remote_path, str(local_path))
 
 
-def execute_command(ssh: paramiko.SSHClient, command: str) -> int:
+def execute_command(ssh: paramiko.SSHClient, command: str) -> Tuple[int, List[str]]:
     print(f"执行远程命令: {command}")
     stdin, stdout, stderr = ssh.exec_command(command, get_pty=True)
+    output_lines: List[str] = []
     for line in stdout:
-        print(line.rstrip())
+        text = line.rstrip("\n")
+        output_lines.append(text)
+        print(text)
     err = stderr.read().decode("utf-8")
     if err:
+        output_lines.append(err.rstrip("\n"))
         print(err, file=sys.stderr)
-    return stdout.channel.recv_exit_status()
+    exit_status = stdout.channel.recv_exit_status()
+    return exit_status, output_lines
 
 
 def parse_bool_flag(value: Optional[bool], prompt_text: str) -> Optional[bool]:
@@ -330,7 +379,8 @@ def parse_bool_flag(value: Optional[bool], prompt_text: str) -> Optional[bool]:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="远程语音合成自动化脚本")
-    parser.add_argument("--config", default="autodl-test/story.toml", help="本地 story.toml 模板")
+    parser.add_argument("--source-dir", help="包含 story/text/语音文件的本地目录")
+    parser.add_argument("--config", help="本地 story.toml 模板")
     parser.add_argument("--text-file", dest="text_file", help="默认文本文件路径")
     parser.add_argument("--voice", action="append", default=[], help="覆盖说话人音频，格式 name=path，可重复")
     parser.add_argument("--remote-workdir", help="远程工作目录，存放音频/文本/结果")
@@ -353,16 +403,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--model-dir", dest="model_dir")
     args = parser.parse_args(argv)
 
-    config_path = Path(args.config).expanduser().resolve()
+    source_dir: Optional[Path] = None
+    if args.source_dir:
+        source_dir = Path(args.source_dir).expanduser().resolve()
+        if not source_dir.is_dir():
+            raise FileNotFoundError(f"找不到目录: {source_dir}")
+    else:
+        default_dir = Path("autodl-test")
+        default_dir_str = str(default_dir.resolve()) if default_dir.is_dir() else None
+        raw_source = prompt(
+            "请输入包含 story/text/语音的本地目录",
+            default_dir_str,
+            allow_empty=True,
+        )
+        if raw_source:
+            source_dir = Path(raw_source).expanduser().resolve()
+            if not source_dir.is_dir():
+                raise FileNotFoundError(f"找不到目录: {source_dir}")
+
+    if args.config:
+        config_path = Path(args.config).expanduser().resolve()
+    elif source_dir:
+        config_path = source_dir / "story.toml"
+    else:
+        config_path = Path("autodl-test/story.toml").resolve()
+    if not config_path.is_file():
+        raise FileNotFoundError(f"找不到配置文件: {config_path}")
     template = load_config(config_path)
 
-    voices = resolve_voices(template, args.voice)
-    text_path, text_is_temp = resolve_text_path(template, args.text_file)
+    voices = resolve_voices(template, args.voice, source_dir=source_dir)
+    text_path, text_is_temp = resolve_text_path(template, args.text_file, source_dir=source_dir)
 
-    remote_workdir_default = args.remote_workdir or template.get("output_dir") or "/root/autodl-fs"
-    remote_workdir = prompt("远程工作目录", remote_workdir_default).rstrip("/")
-    remote_repo = args.remote_repo or prompt("远程仓库根目录", "~/Development/index-tts")
-    remote_repo = os.path.expanduser(remote_repo.rstrip("/"))
+    def derive_remote_workdir() -> str:
+        if args.remote_workdir:
+            return args.remote_workdir.rstrip("/")
+        template_dir = template.get("output_dir")
+        if isinstance(template_dir, str) and template_dir.strip():
+            if template_dir.startswith("/"):
+                return template_dir.rstrip("/")
+            base = "/root/autodl-fs"
+            return f"{base}/{template_dir.strip('/')}"
+        if source_dir:
+            return f"/root/autodl-fs/{source_dir.name}"
+        return "/root/autodl-fs"
+
+    remote_workdir = derive_remote_workdir()
+    print(f"使用远程工作目录: {remote_workdir}")
+
+    def derive_remote_repo() -> str:
+        if args.remote_repo:
+            return args.remote_repo.rstrip("/")
+        cfg_repo = template.get("remote_repo")
+        if isinstance(cfg_repo, str) and cfg_repo.strip():
+            return cfg_repo.rstrip("/")
+        return "/root/index-tts"
+
+    remote_repo = derive_remote_repo()
+    print(f"使用远程仓库根目录: {remote_repo}")
 
     story_name = args.story_name
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -402,6 +499,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_dir=remote_workdir,
         output_file=default_output,
         subtitle_file=subtitle_name,
+        log_path=f"{remote_workdir}/{story_name}-{timestamp}.log",
         timestamp=timestamp,
     )
 
@@ -450,24 +548,58 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             upload_map[remote_voice_path] = local_voice
         upload_files(sftp, upload_map)
 
+        env_prefix = "export PATH=\"/root/miniconda3/bin:$PATH\""
+        if template.get("hf_endpoint"):
+            env_prefix += f" && export HF_ENDPOINT=\"{template['hf_endpoint']}\""
         command = (
-            f"cd '{remote_paths.repo}' && PYTHONPATH='$PWD' "
-            f"uv run python tools/batch_infer.py --config '{remote_paths.story_path}'"
+            f"cd '{remote_paths.repo}' && {env_prefix} && "
+            f"(PYTHONPATH='$PWD' uv run python tools/batch_infer.py --config '{remote_paths.story_path}' "
+            f"2>&1 | tee '{remote_paths.log_path}')"
         )
-        exit_status = execute_command(client, command)
+        exit_status, output_lines = execute_command(client, command)
+
+        local_log_path = local_output_dir / f"{story_name}-{timestamp}.log"
+        local_log_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
+        print(f"本地日志已保存: {local_log_path}")
+
+        def find_metric(keyword: str) -> Optional[str]:
+            for line in reversed(output_lines):
+                if keyword in line:
+                    return line.strip()
+            return None
+
+        length_line = find_metric("Generated audio length") or find_metric("总时长")
+        total_time_line = find_metric("Total inference time")
+        rtf_line = find_metric("RTF")
+        for label, value in [
+            ("生成时长", length_line),
+            ("总推理耗时", total_time_line),
+            ("RTF", rtf_line),
+        ]:
+            if value:
+                print(f"{label}: {value}")
+
         if exit_status != 0:
             raise SystemExit(f"远程命令执行失败，退出码 {exit_status}")
 
-        remote_audio_path = f"{remote_paths.output_dir}/{remote_paths.output_file}"
-        local_audio_path = local_output_dir / Path(remote_paths.output_file).name
-        download_file(sftp, remote_audio_path, local_audio_path)
+        download_targets: Dict[str, Path] = {
+            f"{remote_paths.output_dir}/{remote_paths.output_file}": (
+                local_output_dir / Path(remote_paths.output_file).name
+            ),
+            remote_paths.log_path: local_output_dir / Path(remote_paths.log_path).name,
+        }
         if remote_paths.subtitle_file:
             if remote_paths.subtitle_file.startswith("/"):
                 remote_sub_path = remote_paths.subtitle_file
             else:
                 remote_sub_path = f"{remote_paths.output_dir}/{remote_paths.subtitle_file}"
-            local_sub_path = local_output_dir / Path(remote_paths.subtitle_file).name
-            download_file(sftp, remote_sub_path, local_sub_path)
+            download_targets[remote_sub_path] = (
+                local_output_dir / Path(remote_paths.subtitle_file).name
+            )
+
+        for remote_path, local_path in download_targets.items():
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            download_file(sftp, remote_path, local_path)
         print("全部完成。")
     finally:
         client.close()

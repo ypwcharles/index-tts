@@ -275,10 +275,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     current_time = 0.0
     interval_samples = 0
 
+    total_segments = len(story)
+    print(f"共 {total_segments} 个片段待合成。")
+
     for idx, (speaker, sentence) in enumerate(story, start=1):
         voice = voices.get(speaker)
         if not voice:
             raise KeyError(f"文本中出现未知说话人 {speaker}")
+
+        preview = sentence.strip().replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:77] + "..."
+        print(f"[{idx}/{total_segments}] {speaker}: {preview}")
 
         sr, audio = synthesize_segment(tts, voice, sentence, runtime)
         if sampling_rate is None:
