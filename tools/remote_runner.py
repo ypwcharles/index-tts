@@ -5,6 +5,8 @@ import shlex
 import sys
 import tempfile
 import time
+import re
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -110,10 +112,70 @@ def load_config(path: Path) -> Dict:
         return tomllib.load(handle)
 
 
+def detect_text_file(source_dir: Path) -> Optional[Path]:
+    prefer = source_dir / f"{source_dir.name}.txt"
+    if prefer.is_file():
+        return prefer
+    return None
+
+
+def detect_voice_files(source_dir: Path) -> Dict[str, Path]:
+    audio_exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
+    pattern = re.compile(r"^speaker(\d+)$", re.IGNORECASE)
+    matches: List[Tuple[int, Path]] = []
+    for audio in source_dir.iterdir():
+        if audio.suffix.lower() not in audio_exts:
+            continue
+        m = pattern.match(audio.stem)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        matches.append((idx, audio))
+
+    voices = OrderedDict()
+    for idx, audio in sorted(matches, key=lambda item: item[0]):
+        voices[f"speaker{idx}"] = audio
+    return voices
+
+
+def build_default_story_config(
+    source_dir: Path,
+    text_path: Path,
+    voices: Dict[str, Path],
+) -> Dict[str, object]:
+    story_name = source_dir.name
+    config: Dict[str, object] = {
+        "model": "index-tts-2",
+        "ref_audio": "",
+        "ref_text": "",
+        "gen_text": "",
+        "gen_file": text_path.name,
+        "remove_silence": True,
+        "output_dir": f"/root/autodl-fs/{story_name}",
+        "output_file": f"{story_name}.mp3",
+        "output_subtitle_file": f"subtitle-{story_name}.json",
+        "runtime": {
+            "interval_silence": 200,
+            "max_text_tokens_per_segment": 120,
+            "use_fp16": True,
+            "use_cuda_kernel": True,
+            "use_deepspeed": False,
+        },
+        "voices": {},
+    }
+
+    in_section = OrderedDict()
+    for name, path in voices.items():
+        in_section[name] = {"ref_audio": path.name, "ref_text": ""}
+    config["voices"] = in_section
+    return config
+
+
 def resolve_voices(
     template: Dict,
     cli_overrides: Sequence[str],
     source_dir: Optional[Path] = None,
+    detected: Optional[Dict[str, Path]] = None,
 ) -> Dict[str, Path]:
     voices = template.get("voices") or {}
     if not voices:
@@ -125,6 +187,18 @@ def resolve_voices(
         name, raw_path = item.split("=", 1)
         overrides[name.strip()] = Path(raw_path.strip()).expanduser().resolve()
     result: Dict[str, Path] = {}
+    if detected:
+        for name, path in detected.items():
+            target = overrides.get(name, path)
+            target = target.expanduser().resolve()
+            if not target.is_file():
+                raise FileNotFoundError(f"说话人 {name} 的音频不存在: {target}")
+            result[name] = target
+            overrides.pop(name, None)
+        if overrides:
+            extra = ", ".join(overrides.keys())
+            raise ValueError(f"--voice 中存在未匹配的说话人: {extra}")
+        return result
     audio_exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".WAV", ".MP3", ".FLAC", ".M4A", ".OGG")
     for name, params in voices.items():
         default_path = Path(params.get("ref_audio", "")).expanduser()
@@ -170,7 +244,14 @@ def resolve_text_path(
     template: Dict,
     cli_path: Optional[str],
     source_dir: Optional[Path] = None,
+    detected: Optional[Path] = None,
 ) -> Tuple[Path, bool]:
+    if detected:
+        resolved = detected.expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"文本文件不存在: {resolved}")
+        print(f"自动匹配到文本文件: {resolved}")
+        return resolved, False
     default_candidates = []
     if cli_path:
         default_candidates.append(cli_path)
@@ -421,18 +502,60 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not source_dir.is_dir():
                 raise FileNotFoundError(f"找不到目录: {source_dir}")
 
+    generated_config = False
+    detected_text_path: Optional[Path] = None
+    detected_voice_map: Optional[Dict[str, Path]] = None
+    if source_dir:
+        detected_text_path = detect_text_file(source_dir)
+        detected_voice_map = detect_voice_files(source_dir)
+        if not detected_voice_map:
+            raise FileNotFoundError(
+                f"在目录 {source_dir} 中未找到命名为 speakerN.* 的音频文件。"
+            )
+        if not detected_text_path:
+            raise FileNotFoundError(
+                f"在目录 {source_dir} 中未找到 {source_dir.name}.txt 文本文件。"
+            )
+
     if args.config:
         config_path = Path(args.config).expanduser().resolve()
     elif source_dir:
         config_path = source_dir / "story.toml"
     else:
         config_path = Path("autodl-test/story.toml").resolve()
+
+    if source_dir and not config_path.is_file():
+        default_config = build_default_story_config(
+            source_dir, detected_text_path, detected_voice_map
+        )
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(dump_toml(default_config), encoding="utf-8")
+        generated_config = True
+        print(f"自动生成 story.toml: {config_path}")
+
     if not config_path.is_file():
         raise FileNotFoundError(f"找不到配置文件: {config_path}")
     template = load_config(config_path)
 
-    voices = resolve_voices(template, args.voice, source_dir=source_dir)
-    text_path, text_is_temp = resolve_text_path(template, args.text_file, source_dir=source_dir)
+    if source_dir:
+        template["gen_file"] = detected_text_path.name
+        voice_section = OrderedDict()
+        for name, path in detected_voice_map.items():
+            voice_section[name] = {"ref_audio": path.name, "ref_text": ""}
+        template["voices"] = voice_section
+
+    voices = resolve_voices(
+        template,
+        args.voice,
+        source_dir=source_dir,
+        detected=detected_voice_map,
+    )
+    text_path, text_is_temp = resolve_text_path(
+        template,
+        args.text_file,
+        source_dir=source_dir,
+        detected=detected_text_path,
+    )
 
     def derive_remote_workdir() -> str:
         if args.remote_workdir:
@@ -556,11 +679,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             f"(PYTHONPATH='$PWD' uv run python tools/batch_infer.py --config '{remote_paths.story_path}' "
             f"2>&1 | tee '{remote_paths.log_path}')"
         )
+        start_ts = time.time()
         exit_status, output_lines = execute_command(client, command)
+        wall_elapsed = time.time() - start_ts
 
-        local_log_path = local_output_dir / f"{story_name}-{timestamp}.log"
-        local_log_path.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
-        print(f"本地日志已保存: {local_log_path}")
+        log_dest = (
+            source_dir / f"{story_name}-{timestamp}.log"
+            if source_dir
+            else local_output_dir / f"{story_name}-{timestamp}.log"
+        )
+        log_dest.write_text("\n".join(output_lines) + "\n", encoding="utf-8")
+        print(f"本地日志已保存: {log_dest}")
 
         def find_metric(keyword: str) -> Optional[str]:
             for line in reversed(output_lines):
@@ -571,6 +700,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         length_line = find_metric("Generated audio length") or find_metric("总时长")
         total_time_line = find_metric("Total inference time")
         rtf_line = find_metric("RTF")
+
+        generated_duration = None
+        if length_line:
+            match = re.search(r"([0-9.]+)\s*秒", length_line)
+            if match:
+                generated_duration = float(match.group(1))
+
+        model_elapsed = None
+        if total_time_line:
+            match = re.search(r"([0-9.]+)\s*seconds", total_time_line)
+            if match:
+                model_elapsed = float(match.group(1))
+
+        reported_rtf = None
+        if rtf_line:
+            match = re.search(r"RTF:\s*([0-9.]+)", rtf_line)
+            if match:
+                reported_rtf = float(match.group(1))
+
         for label, value in [
             ("生成时长", length_line),
             ("总推理耗时", total_time_line),
@@ -579,25 +727,49 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if value:
                 print(f"{label}: {value}")
 
+        print(f"任务总耗时: {wall_elapsed:.2f} 秒")
+        overall_rtf = None
+        if generated_duration and generated_duration > 0:
+            overall_rtf = wall_elapsed / generated_duration
+            print(f"任务总体 RTF: {overall_rtf:.4f}")
+
+        summary_dest = (
+            source_dir / f"{story_name}-{timestamp}-summary.txt"
+            if source_dir
+            else local_output_dir / f"{story_name}-{timestamp}-summary.txt"
+        )
+        with summary_dest.open("w", encoding="utf-8") as fh:
+            if generated_duration is not None:
+                fh.write(f"Generated audio length: {generated_duration:.2f} seconds\n")
+            if model_elapsed is not None:
+                fh.write(f"Model total inference time: {model_elapsed:.2f} seconds\n")
+            fh.write(f"Wall clock elapsed: {wall_elapsed:.2f} seconds\n")
+            if reported_rtf is not None:
+                fh.write(f"Reported RTF: {reported_rtf:.4f}\n")
+            if overall_rtf is not None:
+                fh.write(f"Overall RTF: {overall_rtf:.4f}\n")
+        print(f"汇总信息已保存: {summary_dest}")
+
         if exit_status != 0:
             raise SystemExit(f"远程命令执行失败，退出码 {exit_status}")
 
-        download_targets: Dict[str, Path] = {
-            f"{remote_paths.output_dir}/{remote_paths.output_file}": (
-                local_output_dir / Path(remote_paths.output_file).name
-            ),
-            remote_paths.log_path: local_output_dir / Path(remote_paths.log_path).name,
+        files_to_fetch: Dict[str, Path] = {
+            remote_paths.log_path: source_dir / Path(remote_paths.log_path).name if source_dir else Path(remote_paths.log_path).name,
+            f"{remote_paths.output_dir}/{remote_paths.output_file}": source_dir / Path(remote_paths.output_file).name if source_dir else Path(remote_paths.output_file).name,
         }
+
         if remote_paths.subtitle_file:
             if remote_paths.subtitle_file.startswith("/"):
                 remote_sub_path = remote_paths.subtitle_file
             else:
                 remote_sub_path = f"{remote_paths.output_dir}/{remote_paths.subtitle_file}"
-            download_targets[remote_sub_path] = (
-                local_output_dir / Path(remote_paths.subtitle_file).name
+            files_to_fetch[remote_sub_path] = (
+                source_dir / Path(remote_paths.subtitle_file).name
+                if source_dir
+                else Path(remote_paths.subtitle_file).name
             )
 
-        for remote_path, local_path in download_targets.items():
+        for remote_path, local_path in files_to_fetch.items():
             local_path.parent.mkdir(parents=True, exist_ok=True)
             download_file(sftp, remote_path, local_path)
         print("全部完成。")
