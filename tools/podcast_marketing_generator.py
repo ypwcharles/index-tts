@@ -68,7 +68,13 @@ class SubtitleProcessor:
         # 尝试不同的数据结构
         if isinstance(subtitle_data, dict):
             # 尝试常见的键名
-            possible_keys = ["segments", "results", "transcripts", "items"]
+            possible_keys = [
+                "segments",
+                "results",
+                "transcripts",
+                "items",
+                "subtitles",
+            ]
             for key in possible_keys:
                 if key in subtitle_data and isinstance(subtitle_data[key], list):
                     raw_segments = subtitle_data[key]
@@ -761,8 +767,8 @@ def main() -> int:
         "-o",
         "--output",
         type=Path,
-        default=Path("tools/outputs/podcast_marketing"),
-        help="输出目录 (默认: tools/outputs/podcast_marketing)",
+        default=None,
+        help="输出目录 (默认: 与字幕文件同路径下的 podcast_marketing_outputs)",
     )
     parser.add_argument(
         "--env",
@@ -798,7 +804,10 @@ def main() -> int:
         logging.error(f"❌ 字幕文件不存在: {subtitle_path}")
         return 1
 
-    output_dir = args.output.expanduser().resolve()
+    if args.output is not None:
+        output_dir = args.output.expanduser().resolve()
+    else:
+        output_dir = (subtitle_path.parent / "podcast_marketing_outputs").resolve()
     env_path = args.env.expanduser().resolve()
 
     env_vars = load_env_file(env_path)

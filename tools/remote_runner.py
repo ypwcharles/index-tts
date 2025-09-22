@@ -54,6 +54,8 @@ class RuntimeOverrides:
     use_deepspeed: Optional[bool]
     cfg_path: Optional[str]
     model_dir: Optional[str]
+    num_workers: Optional[int]
+    devices: Optional[str]
 
 
 SSH_DEFAULT_PORT = 22
@@ -341,6 +343,10 @@ def build_remote_config(
         runtime_cfg["use_cuda_kernel"] = overrides.use_cuda_kernel
     if overrides.use_deepspeed is not None:
         runtime_cfg["use_deepspeed"] = overrides.use_deepspeed
+    if overrides.num_workers is not None:
+        runtime_cfg["num_workers"] = overrides.num_workers
+    if overrides.devices is not None:
+        runtime_cfg["devices"] = overrides.devices
 
     voices_cfg = {}
     template_voices = template.get("voices", {})
@@ -465,6 +471,24 @@ def parse_bool_flag(value: Optional[bool], prompt_text: str) -> Optional[bool]:
     return None
 
 
+def prompt_int_choice(prompt_text: str, default: int, minimum: int = 1) -> int:
+    if default < minimum:
+        default = minimum
+    while True:
+        raw = input(f"{prompt_text} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print("请输入有效的整数。\n")
+            continue
+        if value < minimum:
+            print(f"请输入不小于 {minimum} 的整数。\n")
+            continue
+        return value
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="远程语音合成自动化脚本")
     parser.add_argument("--source-dir", help="包含 story/text/语音文件的本地目录")
@@ -489,6 +513,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.set_defaults(use_deepspeed=None)
     parser.add_argument("--cfg-path", dest="cfg_path")
     parser.add_argument("--model-dir", dest="model_dir")
+    parser.add_argument("--num-workers", type=int, help="远端 batch_infer 并行 worker 数量")
+    parser.add_argument("--devices", help="远端 batch_infer worker 设备列表，如 cuda:0,cuda:1,cuda:2")
     parser.add_argument("--ssh", help="完整的 SSH 命令或 user@host 格式；可包含 -p 端口")
     parser.add_argument("--password", help="SSH 密码；如留空则按默认方式登录")
     args = parser.parse_args(argv)
@@ -621,6 +647,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     use_cuda_kernel = parse_bool_flag(args.use_cuda_kernel, "是否使用 BigVGAN CUDA kernel")
     use_deepspeed = parse_bool_flag(args.use_deepspeed, "是否启用 DeepSpeed")
 
+    runtime_template = template.get("runtime", {}) if isinstance(template.get("runtime"), dict) else {}
+    default_workers_cfg = runtime_template.get("num_workers")
+    try:
+        default_workers = int(default_workers_cfg)
+    except (TypeError, ValueError):
+        default_workers = 3
+    num_workers = args.num_workers if args.num_workers is not None else prompt_int_choice(
+        "并行 worker 数量", default_workers if default_workers > 0 else 3, minimum=1
+    )
+
     overrides = RuntimeOverrides(
         device=args.device,
         use_fp16=use_fp16,
@@ -628,6 +664,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         use_deepspeed=use_deepspeed,
         cfg_path=args.cfg_path,
         model_dir=args.model_dir,
+        num_workers=num_workers,
+        devices=args.devices,
     )
 
     remote_paths = RemotePaths(

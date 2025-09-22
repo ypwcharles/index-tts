@@ -1,13 +1,15 @@
 import argparse
 import json
 import os
+import queue
 import re
 import sys
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torchaudio
+import torch.multiprocessing as mp
 
 try:
     import tomllib  # Python 3.11+
@@ -42,11 +44,36 @@ class RuntimeConfig:
     use_cuda_kernel: Optional[bool]
     use_deepspeed: bool
     verbose: bool
+    num_workers: int
+    worker_devices: Optional[List[str]]
 
 
 def load_toml(path: str) -> Dict:
     with open(path, "rb") as handle:
         return tomllib.load(handle)
+
+
+def normalize_devices(value: Optional[Any]) -> Optional[List[str]]:
+    """Normalize device specification to a list of strings."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+        normalized = [item for item in items if item]
+        return normalized or None
+    if isinstance(value, (list, tuple)):
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        return normalized or None
+    raise TypeError(f"Unsupported devices specification type: {type(value)!r}")
+
+
+def resolve_worker_devices(runtime: RuntimeConfig) -> List[Optional[str]]:
+    if runtime.worker_devices:
+        return list(runtime.worker_devices)
+    if runtime.device:
+        return [runtime.device]
+    return []
 
 
 def resolve_text(config: Dict, text_override: Optional[str], file_override: Optional[str]) -> str:
@@ -156,6 +183,19 @@ def build_runtime(config: Dict, args: argparse.Namespace) -> RuntimeConfig:
     output_file = args.output_file or config.get("output_file") or "generated.wav"
     subtitle_file = args.subtitle_file or config.get("output_subtitle_file")
 
+    num_workers_raw = args.num_workers if args.num_workers is not None else runtime_cfg.get("num_workers", 1)
+    try:
+        num_workers = int(num_workers_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"无法解析 num_workers={num_workers_raw!r}，请确认为整数。") from exc
+    if num_workers < 1:
+        num_workers = 1
+
+    devices_raw = args.devices if args.devices is not None else runtime_cfg.get("devices")
+    worker_devices: Optional[List[str]] = None
+    if devices_raw is not None:
+        worker_devices = normalize_devices(devices_raw)
+
     return RuntimeConfig(
         cfg_path=runtime_cfg.get("cfg_path", "checkpoints/config.yaml"),
         model_dir=runtime_cfg.get("model_dir", "checkpoints"),
@@ -170,6 +210,8 @@ def build_runtime(config: Dict, args: argparse.Namespace) -> RuntimeConfig:
         use_cuda_kernel=runtime_cfg.get("use_cuda_kernel") if args.use_cuda_kernel is None else args.use_cuda_kernel,
         use_deepspeed=bool(runtime_cfg.get("use_deepspeed", False)) if args.use_deepspeed is None else args.use_deepspeed,
         verbose=args.verbose,
+        num_workers=num_workers,
+        worker_devices=worker_devices,
     )
 
 
@@ -216,6 +258,109 @@ def synthesize_segment(
     sampling_rate, wav_np = result
     wav_tensor = torch.from_numpy(wav_np.T).to(torch.float32) / 32767.0
     return sampling_rate, wav_tensor
+
+
+def _worker_main(
+    task_queue: mp.Queue,
+    result_queue: mp.Queue,
+    error_queue: mp.Queue,
+    runtime: RuntimeConfig,
+    voices: Dict[str, VoiceConfig],
+    worker_device: Optional[str],
+    worker_id: int,
+) -> None:
+    try:
+        worker_runtime = replace(runtime, device=worker_device)
+        tts = instantiate_tts(worker_runtime)
+        while True:
+            payload = task_queue.get()
+            if payload is None:
+                break
+            idx, speaker, sentence = payload
+            voice = voices[speaker]
+            sr, audio = synthesize_segment(tts, voice, sentence, worker_runtime)
+            audio = audio.to(torch.float32).cpu().contiguous()
+            result_queue.put((idx, sr, audio))
+    except Exception as exc:  # pragma: no cover - defensive guard
+        import traceback
+
+        tb = traceback.format_exc()
+        error_queue.put((worker_id, str(exc), tb))
+
+
+def run_sequential(
+    tasks: Sequence[Tuple[int, str, str]],
+    voices: Dict[str, VoiceConfig],
+    runtime: RuntimeConfig,
+) -> Dict[int, Tuple[int, torch.Tensor]]:
+    tts = instantiate_tts(runtime)
+    results: Dict[int, Tuple[int, torch.Tensor]] = {}
+    for idx, speaker, sentence in tasks:
+        voice = voices[speaker]
+        sr, audio = synthesize_segment(tts, voice, sentence, runtime)
+        results[idx] = (sr, audio.to(torch.float32))
+    return results
+
+
+def run_parallel(
+    tasks: Sequence[Tuple[int, str, str]],
+    voices: Dict[str, VoiceConfig],
+    runtime: RuntimeConfig,
+    num_workers: int,
+) -> Dict[int, Tuple[int, torch.Tensor]]:
+    mp.set_start_method("spawn", force=True)
+    task_queue: mp.Queue = mp.Queue()
+    result_queue: mp.Queue = mp.Queue()
+    error_queue: mp.Queue = mp.Queue()
+
+    worker_devices = resolve_worker_devices(runtime)
+    if worker_devices:
+        print(f"worker 设备分配: {', '.join(worker_devices)}")
+
+    processes: List[mp.Process] = []
+    for worker_idx in range(num_workers):
+        device = worker_devices[worker_idx % len(worker_devices)] if worker_devices else None
+        process = mp.Process(
+            target=_worker_main,
+            args=(task_queue, result_queue, error_queue, runtime, voices, device, worker_idx),
+        )
+        process.start()
+        processes.append(process)
+
+    for payload in tasks:
+        task_queue.put(payload)
+
+    for _ in processes:
+        task_queue.put(None)
+
+    results: Dict[int, Tuple[int, torch.Tensor]] = {}
+    remaining = len(tasks)
+    while remaining > 0:
+        try:
+            idx, sr, audio = result_queue.get(timeout=1.0)
+        except queue.Empty:
+            if not error_queue.empty():
+                worker_id, message, tb = error_queue.get()
+                for proc in processes:
+                    proc.terminate()
+                raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
+            continue
+        results[idx] = (sr, audio)
+        remaining -= 1
+        if not error_queue.empty():
+            worker_id, message, tb = error_queue.get()
+            for proc in processes:
+                proc.terminate()
+            raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
+
+    for proc in processes:
+        proc.join()
+
+    while not error_queue.empty():
+        worker_id, message, tb = error_queue.get()
+        raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
+
+    return results
 
 
 def insert_silence(channel: int, samples: int) -> torch.Tensor:
@@ -266,6 +411,52 @@ def dump_subtitles(path: str, entries: List[Dict]) -> None:
         json.dump(payload, handle, ensure_ascii=False, indent=2)
 
 
+def assemble_segments(
+    tasks: Sequence[Tuple[int, str, str]],
+    results: Dict[int, Tuple[int, torch.Tensor]],
+    runtime: RuntimeConfig,
+) -> Tuple[torch.Tensor, int, List[Dict]]:
+    generated: List[torch.Tensor] = []
+    subtitles: List[Dict] = []
+    sampling_rate: Optional[int] = None
+    channel_count: Optional[int] = None
+    current_time = 0.0
+    interval_samples = 0
+
+    total_segments = len(tasks)
+    for order_idx, (idx, speaker, sentence) in enumerate(tasks):
+        if idx not in results:
+            raise KeyError(f"缺少片段 {idx} 的合成结果。")
+        sr, audio = results[idx]
+        tensor = audio.to(torch.float32)
+        if tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0)
+        if sampling_rate is None:
+            sampling_rate = sr
+            channel_count = tensor.shape[0]
+            interval_samples = int(sampling_rate * runtime.interval_silence_ms / 1000.0)
+        elif sr != sampling_rate:
+            raise RuntimeError("不同片段的采样率不一致，推理结果异常。")
+
+        duration = tensor.shape[1] / sampling_rate
+        start_time = current_time
+        end_time = start_time + duration
+        subtitles.append(build_subtitle_entry(start_time, end_time, speaker, sentence))
+        generated.append(tensor)
+        current_time = end_time
+
+        if order_idx != total_segments - 1 and interval_samples > 0:
+            silence = insert_silence(channel_count, interval_samples)
+            generated.append(silence)
+            current_time += interval_samples / sampling_rate
+
+    if sampling_rate is None:
+        raise RuntimeError("未成功生成任何音频片段。")
+
+    final_audio = torch.cat(generated, dim=1)
+    return final_audio, sampling_rate, subtitles
+
+
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="批量多说话人推理脚本")
     parser.add_argument("--config", required=True, help="story.toml 配置文件路径")
@@ -285,6 +476,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--no-use-deepspeed", dest="use_deepspeed", action="store_false", help="关闭 DeepSpeed")
     parser.set_defaults(use_deepspeed=None)
     parser.add_argument("--verbose", action="store_true", help="输出详细日志")
+    parser.add_argument("--num-workers", type=int, help="并行 worker 数量，默认 1")
+    parser.add_argument(
+        "--devices",
+        help="逗号分隔的 worker 设备列表，如 cuda:0,cuda:1；缺省时复用 --device 或自动判定",
+    )
     return parser.parse_args(argv)
 
 
@@ -297,51 +493,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     text = resolve_text(config, args.text, args.text_file)
     story = parse_story(text)
 
-    tts = instantiate_tts(runtime)
-
-    generated: List[torch.Tensor] = []
-    subtitles: List[Dict] = []
-    sampling_rate: Optional[int] = None
-    channel_count: Optional[int] = None
-    current_time = 0.0
-    interval_samples = 0
-
     total_segments = len(story)
     print(f"共 {total_segments} 个片段待合成。")
 
+    tasks: List[Tuple[int, str, str]] = []
     for idx, (speaker, sentence) in enumerate(story, start=1):
-        voice = voices.get(speaker)
-        if not voice:
+        if speaker not in voices:
             raise KeyError(f"文本中出现未知说话人 {speaker}")
-
         preview = sentence.strip().replace("\n", " ")
         if len(preview) > 80:
             preview = preview[:77] + "..."
         print(f"[{idx}/{total_segments}] {speaker}: {preview}")
+        tasks.append((idx, speaker, sentence))
 
-        sr, audio = synthesize_segment(tts, voice, sentence, runtime)
-        if sampling_rate is None:
-            sampling_rate = sr
-            channel_count = audio.shape[0]
-            interval_samples = int(sampling_rate * runtime.interval_silence_ms / 1000.0)
-        elif sr != sampling_rate:
-            raise RuntimeError("不同片段的采样率不一致，推理结果异常。")
+    num_workers = max(1, runtime.num_workers)
+    if num_workers > 1:
+        print(f"启用并行模式，worker 数量: {num_workers}")
+        results = run_parallel(tasks, voices, runtime, num_workers)
+    else:
+        results = run_sequential(tasks, voices, runtime)
 
-        duration = audio.shape[1] / sampling_rate
-        start_time = current_time
-        end_time = start_time + duration
-        subtitles.append(build_subtitle_entry(start_time, end_time, speaker, sentence))
-        generated.append(audio)
-        current_time = end_time
-
-        if idx != len(story) and interval_samples > 0:
-            generated.append(insert_silence(channel_count, interval_samples))
-            current_time += interval_samples / sampling_rate
-
-    if sampling_rate is None:
-        raise RuntimeError("未成功生成任何音频片段。")
-
-    final_audio = torch.cat(generated, dim=1)
+    final_audio, sampling_rate, subtitles = assemble_segments(tasks, results, runtime)
 
     if runtime.remove_silence:
         final_audio = maybe_trim_silence(final_audio, sampling_rate)
