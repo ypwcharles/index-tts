@@ -489,6 +489,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.set_defaults(use_deepspeed=None)
     parser.add_argument("--cfg-path", dest="cfg_path")
     parser.add_argument("--model-dir", dest="model_dir")
+    parser.add_argument("--ssh", help="完整的 SSH 命令或 user@host 格式；可包含 -p 端口")
+    parser.add_argument("--password", help="SSH 密码；如留空则按默认方式登录")
     args = parser.parse_args(argv)
 
     source_dir: Optional[Path] = None
@@ -604,9 +606,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif subtitle_name is None and template.get("output_subtitle_file"):
         subtitle_name = f"subtitle-{story_name}-{timestamp}.json"
 
-    ssh_command = prompt("请输入 SSH 连接命令 (例如 ssh -p 22774 root@example.com)")
-    login = parse_ssh_command(ssh_command)
-    password = getpass.getpass(f"输入 {login['user']}@{login['host']} 的密码: ")
+    if args.ssh:
+        login = parse_ssh_command(args.ssh)
+    else:
+        ssh_command = prompt("请输入 SSH 连接命令 (例如 ssh -p 22774 root@example.com)")
+        login = parse_ssh_command(ssh_command)
+
+    if args.password is not None:
+        password = args.password or None
+    else:
+        password = getpass.getpass(f"输入 {login['user']}@{login['host']} 的密码: ")
 
     use_fp16 = parse_bool_flag(args.use_fp16, "是否开启 FP16")
     use_cuda_kernel = parse_bool_flag(args.use_cuda_kernel, "是否使用 BigVGAN CUDA kernel")
@@ -664,7 +673,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         port=login["port"],
         username=login["user"],
         password=password,
-        look_for_keys=False,
+        look_for_keys=not bool(password),
     )
     try:
         sftp = client.open_sftp()
