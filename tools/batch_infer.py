@@ -70,7 +70,38 @@ def read_text_file(path: str) -> str:
         return handle.read()
 
 
+def normalize_story_script(script: str) -> str:
+    """Normalize raw script so that each [speaker] section starts a new line.
+
+    This enables inputs where multiple [speaker] tags appear on the same line
+    (e.g. "[speaker0]: hi. [speaker1]: hello.") to be parsed correctly by
+    the line-based parser below.
+
+    The strategy is to scan for occurrences of a bracketed tag like
+    "[speakerX]" (optionally followed by colon/space) and split the text into
+    segments, each beginning with such a tag. Any text between two tags is
+    kept as the content for the preceding tag. Content before the first tag is
+    ignored.
+    """
+    # Normalize newlines and trim outer whitespace
+    s = script.replace("\r\n", "\n").replace("\r", "\n").strip()
+    # Only split at speaker tags like [speaker0], [speakerA], ... (case-insensitive).
+    tag_iter = list(re.finditer(r"\[\s*speaker[^\]]*\]", s, flags=re.IGNORECASE))
+    if not tag_iter:
+        return script
+    parts: List[str] = []
+    for idx, m in enumerate(tag_iter):
+        start = m.start()
+        next_start = tag_iter[idx + 1].start() if idx + 1 < len(tag_iter) else len(s)
+        segment = s[start:next_start].strip()
+        if segment:
+            parts.append(segment)
+    return "\n".join(parts)
+
+
 def parse_story(script: str) -> List[Tuple[str, str]]:
+    # Preprocess so multiple [speaker] tokens on one line get split by lines
+    script = normalize_story_script(script)
     pattern = re.compile(r"^\s*\[(?P<speaker>[^\]]+)\]\s*(?P<text>.*\S)?\s*$")
     result: List[Tuple[str, str]] = []
     for idx, raw in enumerate(script.splitlines(), start=1):
