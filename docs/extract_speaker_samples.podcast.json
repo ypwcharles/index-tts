@@ -1,0 +1,13 @@
+{
+  "min_start": 420,
+  "hard_skip_tail": 60,
+  "per_speaker": 3,
+  "min_speech_ratio": 0.75,
+  "bgm_threshold": 0.5,
+  "vad_aggressiveness": 2,
+  "sample_top_k": 5,
+  "workers": 8,
+  "preload_audio": true,
+  "afilter": "highpass=f=80,lowpass=f=8000,afftdn=nf=-28"
+}
+

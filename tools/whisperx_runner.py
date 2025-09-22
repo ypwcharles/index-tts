@@ -1,4 +1,5 @@
 import argparse
+import json
 import getpass
 import shlex
 import sys
@@ -35,13 +36,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--remote-dir",
         dest="remote_dir",
-        default="/root/autodl-fs/whisperx",
+        default="/root/autodl-fs/whisperX",
         help="Remote base directory to store uploads and outputs.",
     )
     parser.add_argument(
         "--remote-project",
         dest="remote_project",
-        default="/root/autodl-tmp/whisperX",
+        default="/root/autodl-fs/whisperX",
         help="Remote WhisperX project directory with uv environment.",
     )
     parser.add_argument(
@@ -310,6 +311,55 @@ def build_torch_upgrade_command(
     return f"bash -lc {shlex.quote(full)}"
 
 
+def _is_diarization_json(path: Path) -> bool:
+    """Heuristically detect a WhisperX diarization JSON (segments -> words with speaker)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        segs = data.get("segments")
+        if not isinstance(segs, list):
+            return False
+        for seg in segs:
+            words = seg.get("words") if isinstance(seg, dict) else None
+            if not isinstance(words, list):
+                continue
+            for w in words:
+                if isinstance(w, dict) and "speaker" in w and w.get("end") is not None:
+                    return True
+        return False
+    except Exception:
+        return False
+
+
+def _collect_speakers_from_json(path: Path) -> Dict[str, str]:
+    """Return mapping of raw speaker labels -> normalized tags (e.g., SPEAKER_00 -> speaker0)."""
+    result: Dict[str, str] = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        speakers = []
+        for seg in data.get("segments", []):
+            for w in seg.get("words", []) or []:
+                s = w.get("speaker")
+                if isinstance(s, str):
+                    speakers.append(s)
+        seen = []
+        for s in speakers:
+            if s in seen:
+                continue
+            seen.append(s)
+        def _norm(label: str) -> str:
+            # Try to extract trailing number
+            import re as _re
+            m = _re.search(r"(\d+)$", label)
+            if m:
+                return f"speaker{int(m.group(1))}"
+            return f"speaker{len(result)}" if label not in result else result[label]
+        for s in seen:
+            result[s] = _norm(s)
+    except Exception:
+        pass
+    return result
+
+
 def build_whisperx_command(
     remote_project: str,
     remote_audio_paths: Sequence[str],
@@ -503,6 +553,45 @@ def main() -> None:
         log_path = local_run_dir / f"{run_name}.log"
         log_path.write_text("\n".join(log_lines) + "\n", encoding="utf-8")
         print(f"日志已写入 {log_path}")
+
+        # Produce a small handoff index to standardize downstream usage
+        best_json: Optional[Path] = None
+        best_txt: Optional[Path] = None
+        # Prefer largest .txt as transcript
+        txt_candidates = [p for p in downloaded if p.suffix.lower() == ".txt"]
+        if txt_candidates:
+            best_txt = max(txt_candidates, key=lambda p: p.stat().st_size)
+        # Detect diarization JSON
+        json_candidates = [p for p in downloaded if p.suffix.lower() == ".json"]
+        for p in json_candidates:
+            if _is_diarization_json(p):
+                best_json = p
+                break
+        speakers_map: Dict[str, str] = {}
+        if best_json is not None:
+            speakers_map = _collect_speakers_from_json(best_json)
+        handoff = {
+            "run_name": run_name,
+            "remote_run_dir": remote_run_dir,
+            "local_run_dir": str(local_run_dir),
+            "audio": str(local_audio_paths[0]) if local_audio_paths else None,
+            "files": [
+                {"name": p.name, "path": str(p), "size": p.stat().st_size}
+                for p in downloaded
+            ],
+            "best": {
+                "diarization_json": str(best_json) if best_json else None,
+                "transcript_txt": str(best_txt) if best_txt else None,
+            },
+            "speakers": {
+                "raw_to_tag": speakers_map,
+                "tags": sorted(set(speakers_map.values())) if speakers_map else [],
+            },
+        }
+        (local_run_dir / "handoff.json").write_text(
+            json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"交接索引已写入 {(local_run_dir / 'handoff.json')}")
 
         if not args.keep_remote:
             cleanup_cmd = f"rm -rf {shlex.quote(remote_run_dir)}"

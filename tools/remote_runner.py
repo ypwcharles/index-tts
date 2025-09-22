@@ -121,20 +121,27 @@ def detect_text_file(source_dir: Path) -> Optional[Path]:
 
 def detect_voice_files(source_dir: Path) -> Dict[str, Path]:
     audio_exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
-    pattern = re.compile(r"^speaker(\d+)$", re.IGNORECASE)
-    matches: List[Tuple[int, Path]] = []
+    pattern = re.compile(r"^speaker([0-9]+|[A-Za-z]+)$", re.IGNORECASE)
+    matches: List[Tuple[Tuple[int, object], str, Path]] = []
     for audio in source_dir.iterdir():
         if audio.suffix.lower() not in audio_exts:
             continue
         m = pattern.match(audio.stem)
         if not m:
             continue
-        idx = int(m.group(1))
-        matches.append((idx, audio))
+        suffix = m.group(1)
+        if suffix.isdigit():
+            index = int(suffix)
+            voice_name = f"speaker{index}"
+            sort_key: Tuple[int, object] = (0, index)
+        else:
+            voice_name = f"speaker{suffix}"
+            sort_key = (1, suffix.lower())
+        matches.append((sort_key, voice_name, audio))
 
     voices = OrderedDict()
-    for idx, audio in sorted(matches, key=lambda item: item[0]):
-        voices[f"speaker{idx}"] = audio
+    for _, name, audio in sorted(matches, key=lambda item: item[0]):
+        voices[name] = audio
     return voices
 
 
@@ -510,7 +517,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         detected_voice_map = detect_voice_files(source_dir)
         if not detected_voice_map:
             raise FileNotFoundError(
-                f"在目录 {source_dir} 中未找到命名为 speakerN.* 的音频文件。"
+                f"在目录 {source_dir} 中未找到命名为 speakerN.* (N 可为数字或字母) 的音频文件。"
             )
         if not detected_text_path:
             raise FileNotFoundError(
