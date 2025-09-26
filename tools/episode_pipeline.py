@@ -322,9 +322,30 @@ class EpisodePipeline:
         self.state.save()
         return audio
 
-    def run(self) -> None:
+    def run(self, from_step: Optional[str] = None) -> None:
         audio_path = self.ensure_audio()
-        for step in STEP_ORDER:
+        # 起始步骤选择：支持命令行指定或交互选择
+        step_names_cn = [
+            "语音识别 (transcribe)",
+            "样本提取 (samples)",
+            "翻译优化 (translate)",
+            "TTS 准备 (tts_prep)",
+            "语音合成 (synthesize)",
+        ]
+        if from_step and from_step in STEP_ORDER:
+            start_index = STEP_ORDER.index(from_step)
+        else:
+            # 默认从第一个非 done 的步骤开始
+            start_index = 0
+            for i, name in enumerate(STEP_ORDER):
+                if self.state.step(name).status != "done":
+                    start_index = i
+                    break
+            # 允许用户覆盖默认选择
+            print_header("选择起始步骤")
+            start_index = choose("从哪一步开始重新执行?", step_names_cn, default_index=start_index)
+
+        for step in STEP_ORDER[start_index:]:
             while True:
                 info = self.state.step(step)
                 if info.status == "done":
@@ -831,6 +852,7 @@ def select_episode() -> EpisodeState:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="播客本地化流水线 (交互式)")
     parser.add_argument("--episode", help="直接指定项目 ID", default=None)
+    parser.add_argument("--from-step", choices=STEP_ORDER, help="从指定步骤开始执行 (transcribe/samples/translate/tts_prep/synthesize)")
     args = parser.parse_args(argv)
 
     if args.episode:
@@ -842,7 +864,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     remote_cfg = prompt_remote_config()
     pipeline = EpisodePipeline(state, remote_cfg)
     try:
-        pipeline.run()
+        pipeline.run(from_step=args.from_step)
     finally:
         pipeline.close()
     print("流程结束。")
