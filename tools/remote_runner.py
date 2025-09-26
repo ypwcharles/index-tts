@@ -61,6 +61,12 @@ class RuntimeOverrides:
 
 SSH_DEFAULT_PORT = 22
 
+# 固定远端语音资源（无需上传，直接在 story.toml 中引用绝对路径）。
+# key 一律使用小写匹配。
+FIXED_REMOTE_VOICES: Dict[str, str] = {
+    "speakery": "/root/autodl-fs/speakerY.mp3",
+}
+
 
 def prompt(text: str, default: Optional[str] = None, allow_empty: bool = False) -> str:
     suffix = f" [{default}]" if default else ""
@@ -437,10 +443,16 @@ def build_remote_config(
     template_voices = template.get("voices", {})
     for name, params in template_voices.items():
         voice_data = dict(params)
-        # Include voice key in remote file to avoid collisions when多个标签复用同一文件
-        remote_audio = f"{remote.workdir}/{remote.timestamp}-{name}-{voices[name].name}"
+        # Include voice key in remote file to avoid collisions; allow fixed remote mapping
+        lower = name.lower()
+        fixed_remote = FIXED_REMOTE_VOICES.get(lower)
+        if fixed_remote:
+            remote_audio = fixed_remote
+        else:
+            remote_audio = f"{remote.workdir}/{remote.timestamp}-{name}-{voices[name].name}"
         voice_data["ref_audio"] = remote_audio
         if voice_data.get("emo_audio"):
+            # 情绪音频暂不提供固定远端，仍按常规上传路径处理
             voice_data["emo_audio"] = f"{remote.workdir}/{remote.timestamp}-{name}-{Path(voice_data['emo_audio']).name}"
         voices_cfg[name] = voice_data
 
@@ -911,6 +923,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             remote_paths.text_path: assets.text_path,
         }
         for voice_name, local_voice in voices.items():
+            fixed = FIXED_REMOTE_VOICES.get(voice_name.lower())
+            if fixed:
+                print(f"跳过上传固定远端语音: {voice_name} -> {fixed}")
+                continue
             remote_voice_path = f"{remote_paths.workdir}/{remote_paths.timestamp}-{voice_name}-{local_voice.name}"
             upload_map[remote_voice_path] = local_voice
         upload_files(sftp, upload_map)
