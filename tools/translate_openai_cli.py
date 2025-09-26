@@ -77,7 +77,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", help="Override model name")
     p.add_argument("--temperature", type=float, default=0.2)
     p.add_argument("--top-p", dest="top_p", type=float, default=1.0)
-    p.add_argument("--max-tokens", dest="max_tokens", type=int, default=None)
+    p.add_argument(
+        "--max-tokens",
+        dest="max_tokens",
+        type=int,
+        default=65000,
+        help="Max tokens for response (default: 65000)",
+    )
     p.add_argument("--timeout", type=int, default=300, help="HTTP timeout seconds")
     # JSON handling
     p.add_argument("--emit-json", action="store_true", help="Expect and save JSON output based on the prompt's schema")
