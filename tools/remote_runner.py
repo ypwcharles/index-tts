@@ -122,6 +122,22 @@ def detect_text_file(source_dir: Path) -> Optional[Path]:
     return None
 
 
+def detect_any_text_file(source_dir: Path) -> Optional[Path]:
+    """Fallback: pick a .txt file in the directory when <dir>.txt is missing.
+
+    Strategy: choose the largest .txt file (heuristic for full script),
+    otherwise return the first one if sizes are equal.
+    """
+    candidates = [p for p in source_dir.glob("*.txt") if p.is_file()]
+    if not candidates:
+        return None
+    try:
+        candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    except Exception:
+        candidates.sort()
+    return candidates[0]
+
+
 def detect_voice_files(source_dir: Path) -> Dict[str, Path]:
     audio_exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
     pattern = re.compile(r"^speaker([0-9]+|[A-Za-z]+)$", re.IGNORECASE)
@@ -146,6 +162,71 @@ def detect_voice_files(source_dir: Path) -> Dict[str, Path]:
     for _, name, audio in sorted(matches, key=lambda item: item[0]):
         voices[name] = audio
     return voices
+
+
+def detect_voices_from_project(root: Path) -> Optional[Dict[str, Path]]:
+    """Detect voices from a typical project目录（含 samples/ 与 manifest.json）。
+
+    优先读取 samples/manifest.json 的 summary.selected 映射；
+    否则从 samples/ 目录扫描 speaker*.{wav,mp3,...}。
+    返回 {voice_name -> Path} 或 None（未找到）。
+    """
+    samples_dir = root / "samples"
+    manifest = samples_dir / "manifest.json"
+    audio_map: Dict[str, Path] = {}
+    try:
+        if manifest.is_file():
+            data = tomllib.loads("")  # no-op to satisfy type checkers
+    except Exception:
+        pass
+    if manifest.is_file():
+        try:
+            import json as _json
+
+            obj = _json.loads(manifest.read_text(encoding="utf-8"))
+            summary = obj.get("summary") or {}
+            selected = summary.get("selected") or {}
+            if isinstance(selected, dict):
+                for name, files in selected.items():
+                    if not files:
+                        continue
+                    p = Path(files[0])
+                    if not p.is_absolute():
+                        p = (samples_dir / p.name).resolve()
+                    if p.is_file():
+                        audio_map[name] = p
+        except Exception:
+            audio_map = {}
+    if not audio_map and samples_dir.is_dir():
+        audio_exts = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}
+        pattern = re.compile(r"^speaker([0-9]+|[A-Za-z]+)$", re.IGNORECASE)
+        for audio in samples_dir.iterdir():
+            if audio.suffix.lower() not in audio_exts:
+                continue
+            m = pattern.match(audio.stem)
+            if not m:
+                continue
+            suffix = m.group(1)
+            name = f"speaker{suffix}"
+            audio_map[name] = audio.resolve()
+    return audio_map or None
+
+
+def detect_text_from_project(root: Path) -> Optional[Path]:
+    """Detect script from translate/ folder, prefer translate/script.txt, else largest .txt.
+    """
+    trans_dir = root / "translate"
+    prefer = trans_dir / "script.txt"
+    if prefer.is_file():
+        return prefer
+    candidates = [p for p in trans_dir.glob("*.txt") if p.is_file()]
+    if not candidates:
+        return None
+    try:
+        candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+    except Exception:
+        candidates.sort()
+    return candidates[0]
 
 
 def build_default_story_config(
@@ -548,16 +629,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     detected_text_path: Optional[Path] = None
     detected_voice_map: Optional[Dict[str, Path]] = None
     if source_dir:
-        detected_text_path = detect_text_file(source_dir)
+        # 文本：优先 <dir>.txt -> translate/script.txt -> translate/*.txt -> 本目录 *.txt
+        detected_text_path = (
+            detect_text_file(source_dir)
+            or detect_text_from_project(source_dir)
+            or detect_any_text_file(source_dir)
+        )
+        # 语音：优先本目录 speaker*.* -> 项目 samples/manifest.json -> samples/ 扫描
         detected_voice_map = detect_voice_files(source_dir)
         if not detected_voice_map:
+            detected_voice_map = detect_voices_from_project(source_dir) or {}
+        if not detected_voice_map:
             raise FileNotFoundError(
-                f"在目录 {source_dir} 中未找到命名为 speakerN.* (N 可为数字或字母) 的音频文件。"
+                f"在目录 {source_dir} 及其 samples/ 中未找到命名为 speakerN.* (N 可为数字或字母) 的音频文件。"
             )
         if not detected_text_path:
             raise FileNotFoundError(
-                f"在目录 {source_dir} 中未找到 {source_dir.name}.txt 文本文件。"
+                f"在目录 {source_dir} 及其 translate/ 中未找到 {source_dir.name}.txt 或任何 *.txt 文本文件。"
             )
+        print(f"自动匹配到文本文件: {detected_text_path}")
 
     if args.config:
         config_path = Path(args.config).expanduser().resolve()
@@ -735,6 +825,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         temp_files=temp_files,
     )
 
+    # 预处理文本：将脚本中未提供样本的说话人标签重写为已知标签（如存在 speaker0 优先，否则取第一个）
+    try:
+        import re as _re
+
+        known_tags = set(voices.keys())
+        fallback_tag = "speaker0" if "speaker0" in known_tags else (next(iter(known_tags)) if known_tags else None)
+        if fallback_tag:
+            raw_text = text_path.read_text(encoding="utf-8")
+            used_tags: List[str] = []
+            def _collect(line: str) -> None:
+                m = _re.match(r"^\s*\[(?P<tag>[^\]]+)\]", line)
+                if m:
+                    used_tags.append(m.group("tag").strip())
+            for ln in raw_text.splitlines():
+                _collect(ln)
+            unknown = sorted({t for t in used_tags if t not in known_tags})
+            if unknown:
+                print(f"文本中存在未配置样本的标签: {', '.join(unknown)} -> 将重写为 {fallback_tag}")
+                def _rewrite_line(line: str) -> str:
+                    m = _re.match(r"^(\s*)\[(?P<tag>[^\]]+)\](?P<rest>.*)$", line)
+                    if not m:
+                        return line
+                    tag = m.group("tag").strip()
+                    if tag in known_tags:
+                        return line
+                    return f"{m.group(1)}[{fallback_tag}]{m.group('rest')}"
+                rewritten = "\n".join(_rewrite_line(ln) for ln in raw_text.splitlines())
+                tmp_fd, tmp_name = tempfile.mkstemp(prefix="story_text_", suffix=".txt")
+                os.close(tmp_fd)
+                rewritten_path = Path(tmp_name)
+                rewritten_path.write_text(rewritten, encoding="utf-8")
+                assets.text_path = rewritten_path
+                assets.temp_files.append(rewritten_path)
+    except Exception as _exc:
+        print(f"[warn] 文本重写过程出现问题（忽略并继续）：{_exc}")
+
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     print("连接远程服务器...")
@@ -760,11 +886,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         env_prefix = "export PATH=\"/root/miniconda3/bin:$PATH\""
         if template.get("hf_endpoint"):
             env_prefix += f" && export HF_ENDPOINT=\"{template['hf_endpoint']}\""
-        command = (
-            f"cd '{remote_paths.repo}' && {env_prefix} && "
-            f"(PYTHONPATH='$PWD' uv run python tools/batch_infer.py --config '{remote_paths.story_path}' "
-            f"2>&1 | tee '{remote_paths.log_path}')"
+        pipeline = (
+            f"set -o pipefail; cd {shlex.quote(remote_paths.repo)} && {env_prefix} && "
+            f"PYTHONPATH='$PWD' uv run python tools/batch_infer.py --config {shlex.quote(remote_paths.story_path)} "
+            f"2>&1 | tee {shlex.quote(remote_paths.log_path)}"
         )
+        command = f"bash -lc {shlex.quote(pipeline)}"
         start_ts = time.time()
         exit_status, output_lines = execute_command(client, command)
         wall_elapsed = time.time() - start_ts
