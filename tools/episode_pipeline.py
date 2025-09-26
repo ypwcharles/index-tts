@@ -502,39 +502,57 @@ class EpisodePipeline:
         self.state.params["samples"]["per_speaker"] = str(per_speaker)
         self.state.save()
 
-        cleanup_cmd = (
-            f"rm -rf {shlex.quote(remote_samples_dir)} && "
-            f"mkdir -p {shlex.quote(remote_samples_dir)}"
-        )
-        code, _ = self.remote.run(cleanup_cmd)
-        if code != 0:
-            raise PipelineError("远程样本目录准备失败")
+        def _extract_with_flags(extra: str = "") -> Path:
+            cleanup_cmd = (
+                f"rm -rf {shlex.quote(remote_samples_dir)} && "
+                f"mkdir -p {shlex.quote(remote_samples_dir)}"
+            )
+            code, _ = self.remote.run(cleanup_cmd)
+            if code != 0:
+                raise PipelineError("远程样本目录准备失败")
 
-        prefix = (
-            f"cd {shlex.quote(self.remote_cfg.remote_repo)} && "
-            # 确保 uv 在 PATH 中（覆盖常见安装路径）
-            "export PATH=\"$HOME/.local/bin:/usr/local/bin:/root/miniconda3/bin:/opt/conda/bin:$PATH\" && "
-            "(source /etc/network_turbo >/dev/null 2>&1 || true)"
-        )
-        command = (
-            f"{prefix} && uv run python tools/extract_speaker_samples.py "
-            f"{shlex.quote(audio_remote)} {shlex.quote(remote_json)} "
-            f"--output-dir {shlex.quote(remote_samples_dir)} "
-            f"--manifest {shlex.quote(remote_samples_dir + '/manifest.json')} "
-            f"--preset {shlex.quote(preset)} --per-speaker {per_speaker} --workers 4"
-        )
-        print("远程执行样本提取:")
-        print(command)
-        exit_code, _ = self.remote.run(command)
-        if exit_code != 0:
-            raise PipelineError("远程样本提取失败")
+            prefix = (
+                f"cd {shlex.quote(self.remote_cfg.remote_repo)} && "
+                # 确保 uv 在 PATH 中（覆盖常见安装路径）
+                "export PATH=\"$HOME/.local/bin:/usr/local/bin:/root/miniconda3/bin:/opt/conda/bin:$PATH\" && "
+                "(source /etc/network_turbo >/dev/null 2>&1 || true)"
+            )
+            command = (
+                f"{prefix} && uv run python tools/extract_speaker_samples.py "
+                f"{shlex.quote(audio_remote)} {shlex.quote(remote_json)} "
+                f"--output-dir {shlex.quote(remote_samples_dir)} "
+                f"--manifest {shlex.quote(remote_samples_dir + '/manifest.json')} "
+                f"--preset {shlex.quote(preset)} --per-speaker {per_speaker} --workers 4 "
+                f"{extra}"
+            )
+            print("远程执行样本提取:")
+            print(command)
+            exit_code, _ = self.remote.run(command)
+            if exit_code != 0:
+                raise PipelineError("远程样本提取失败")
 
-        self.remote.download_dir(remote_samples_dir, local_samples)
-        manifest_path = local_samples / "manifest.json"
-        if not manifest_path.is_file():
-            raise PipelineError("未找到样本 manifest.json")
+            self.remote.download_dir(remote_samples_dir, local_samples)
+            mpath = local_samples / "manifest.json"
+            if not mpath.is_file():
+                raise PipelineError("未找到样本 manifest.json")
+            return mpath
 
+        # 首次尝试
+        manifest_path = _extract_with_flags()
         summary = self._load_samples_summary(manifest_path)
+        if not (summary.get("speakers") or []):
+            print("[warn] 首次样本提取未找到可用片段，尝试以宽松参数重试…")
+            fallback = (
+                "--min-start 0 --skip-head 0 --hard-skip-tail 0 "
+                "--min-speech-ratio 0.6 --bgm-threshold 0.7 --allow-out-of-range"
+            )
+            origin_preset = preset
+            preset = "relaxed"
+            manifest_path = _extract_with_flags(fallback)
+            summary = self._load_samples_summary(manifest_path)
+            if not (summary.get("speakers") or []):
+                preset = origin_preset
+                print("[warn] 宽松重试仍无样本，请检查音频与分离结果，或稍后手动提供样本文件。")
         self.state.remote["samples_dir"] = remote_samples_dir
         info.mark("done", manifest=str(manifest_path))
         self.state.save()
@@ -737,6 +755,8 @@ class EpisodePipeline:
             self.remote_cfg.remote_repo,
             "--local-output",
             str(self.state.root / "synth"),
+            "--num-workers",
+            "3",
             "--ssh",
             self.remote_cfg.ssh_command(),
         ]
