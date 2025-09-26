@@ -247,18 +247,46 @@ def execute_command(
     command: str,
     timeout: Optional[int] = None,
 ) -> List[str]:
-    stdin, stdout, stderr = ssh.exec_command(command, get_pty=True, timeout=timeout)
+    # Stream both stdout and stderr in real time to avoid the appearance of "hangs"
+    # when libraries (e.g., huggingface_hub/transformers) print progress to stderr.
+    start_ts = time.time()
+    stdin, stdout, stderr = ssh.exec_command(command, get_pty=True)
+    chan = stdout.channel
     lines: List[str] = []
-    for line in stdout:
-        text = line.rstrip("\n")
-        lines.append(text)
-        print(text)
-    err = stderr.read().decode("utf-8")
-    if err:
-        for item in err.rstrip("\n").splitlines():
-            lines.append(item)
-            print(item, file=sys.stderr)
-    exit_status = stdout.channel.recv_exit_status()
+
+    def _drain(buf: bytes, is_err: bool = False) -> None:
+        if not buf:
+            return
+        text = buf.decode("utf-8", errors="replace")
+        for line in text.splitlines():
+            lines.append(line)
+            if is_err:
+                print(line, file=sys.stderr)
+            else:
+                print(line)
+
+    while True:
+        if timeout and (time.time() - start_ts) > timeout:
+            try:
+                chan.close()
+            finally:
+                raise TimeoutError("远程命令执行超时")
+        # Read any available data from stdout/stderr
+        if chan.recv_ready():
+            _drain(chan.recv(4096), is_err=False)
+        if chan.recv_stderr_ready():
+            _drain(chan.recv_stderr(4096), is_err=True)
+        if chan.exit_status_ready() and not chan.recv_ready() and not chan.recv_stderr_ready():
+            break
+        time.sleep(0.05)
+
+    # Ensure any trailing buffers are consumed
+    while chan.recv_ready():
+        _drain(chan.recv(4096), is_err=False)
+    while chan.recv_stderr_ready():
+        _drain(chan.recv_stderr(4096), is_err=True)
+
+    exit_status = chan.recv_exit_status()
     if exit_status != 0:
         raise RuntimeError(f"远程命令返回非零状态: {exit_status}")
     return lines
@@ -306,7 +334,7 @@ def build_torch_upgrade_command(
         cmd.extend(["--index-url", index_url])
     cmd.extend(packages)
     quoted = " ".join(shlex.quote(part) for part in cmd)
-    segments = ["source /etc/network_turbo", f"cd {shlex.quote(remote_project)}", quoted]
+    segments = [f"cd {shlex.quote(remote_project)}", quoted]
     full = " && ".join(segments)
     return f"bash -lc {shlex.quote(full)}"
 
@@ -376,6 +404,7 @@ def build_whisperx_command(
     diarize: bool = True,
     hf_endpoint: Optional[str] = None,
     cudnn_root: Optional[str] = None,
+    env_vars: Optional[Dict[str, str]] = None,
 ) -> str:
     cmd: List[str] = ["uv", "run", "python", "-m", "whisperx"]
     cmd.extend(remote_audio_paths)
@@ -395,7 +424,12 @@ def build_whisperx_command(
         cmd.extend(["--hf_token", hf_token])
     cmd.extend(["--print_progress", "True"])
     quoted = " ".join(shlex.quote(part) for part in cmd)
-    prefix = []
+    prefix: List[str] = []
+    # Export selected environment variables to influence cache locations, endpoints, etc.
+    if env_vars:
+        for k, v in env_vars.items():
+            if v:
+                prefix.append(f"export {k}={shlex.quote(v)}")
     if hf_endpoint:
         prefix.append(f"export HF_ENDPOINT={shlex.quote(hf_endpoint)}")
     if cudnn_root:
@@ -404,7 +438,7 @@ def build_whisperx_command(
         prefix.append('export LIBRARY_PATH=${CUDNN_ROOT}/lib:${LIBRARY_PATH}')
     prefix.append(quoted)
     full_cmd = " && ".join(prefix)
-    segments = ["source /etc/network_turbo", f"cd {shlex.quote(remote_project)}", full_cmd]
+    segments = [f"cd {shlex.quote(remote_project)}", full_cmd]
     full = " && ".join(segments)
     return f"bash -lc {shlex.quote(full)}"
 
@@ -514,6 +548,39 @@ def main() -> None:
 
         hf_endpoint = (env_data.get("HF_ENDPOINT") or "https://huggingface.co").strip() or None
 
+        # Collect optional cache/home env vars to export on the remote before running.
+        export_env: Dict[str, str] = {}
+        for key in [
+            "HF_HOME",
+            "TRANSFORMERS_CACHE",
+            "HUGGINGFACE_HUB_CACHE",
+            "HF_DATASETS_CACHE",
+            "TORCH_HOME",
+            "XDG_CACHE_HOME",
+            # Download backends tuning
+            "HF_HUB_DISABLE_XET",
+            "HF_HUB_ENABLE_HF_TRANSFER",
+        ]:
+            val = env_data.get(key)
+            if val is not None and val.strip() != "":
+                export_env[key] = val.strip()
+
+        # Proactively create cache directories on the remote (some plugins don't auto-create).
+        cache_dirs: List[str] = []
+        for key in [
+            "HF_HOME",
+            "TRANSFORMERS_CACHE",
+            "HUGGINGFACE_HUB_CACHE",
+            "HF_DATASETS_CACHE",
+            "TORCH_HOME",
+            "XDG_CACHE_HOME",
+        ]:
+            v = export_env.get(key)
+            if v:
+                cache_dirs.append(v)
+        if cache_dirs:
+            ensure_remote_dirs(ssh, cache_dirs)
+
         remote_command = build_whisperx_command(
             remote_project=env_data.get("WHISPERX_PROJECT_DIR") or args.remote_project,
             remote_audio_paths=remote_audio_paths,
@@ -530,6 +597,7 @@ def main() -> None:
             diarize=diarize,
             hf_endpoint=hf_endpoint,
             cudnn_root=cudnn_root,
+            env_vars=export_env,
         )
 
         print(f"执行远程命令: {remote_command}")

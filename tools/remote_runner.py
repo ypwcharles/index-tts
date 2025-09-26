@@ -56,6 +56,7 @@ class RuntimeOverrides:
     model_dir: Optional[str]
     num_workers: Optional[int]
     devices: Optional[str]
+    group_by_speaker: Optional[bool]
 
 
 SSH_DEFAULT_PORT = 22
@@ -347,6 +348,8 @@ def build_remote_config(
         runtime_cfg["num_workers"] = overrides.num_workers
     if overrides.devices is not None:
         runtime_cfg["devices"] = overrides.devices
+    if overrides.group_by_speaker is not None:
+        runtime_cfg["group_by_speaker"] = overrides.group_by_speaker
 
     voices_cfg = {}
     template_voices = template.get("voices", {})
@@ -515,6 +518,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--model-dir", dest="model_dir")
     parser.add_argument("--num-workers", type=int, help="远端 batch_infer 并行 worker 数量")
     parser.add_argument("--devices", help="远端 batch_infer worker 设备列表，如 cuda:0,cuda:1,cuda:2")
+    parser.add_argument("--group-by-speaker", dest="group_by_speaker", action="store_true", help="按说话人聚合任务")
+    parser.add_argument("--no-group-by-speaker", dest="group_by_speaker", action="store_false", help="禁用按说话人聚合")
+    parser.set_defaults(group_by_speaker=None)
     parser.add_argument("--ssh", help="完整的 SSH 命令或 user@host 格式；可包含 -p 端口")
     parser.add_argument("--password", help="SSH 密码；如留空则按默认方式登录")
     args = parser.parse_args(argv)
@@ -624,13 +630,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     default_output = args.output_basename or template.get("output_file", "")
     if not default_output:
         default_output = f"{story_name}-{timestamp}.wav"
-    subtitle_name = args.subtitle_name or template.get("output_subtitle_file")
-    if subtitle_name and not subtitle_name.strip():
-        subtitle_name = None
-    if subtitle_name and '{timestamp}' in subtitle_name:
-        subtitle_name = subtitle_name.format(timestamp=timestamp, story=story_name)
-    elif subtitle_name is None and template.get("output_subtitle_file"):
+    subtitle_source_set = False
+    if args.subtitle_name is not None:
+        subtitle_raw: Optional[object] = args.subtitle_name
+        subtitle_source_set = True
+    elif "output_subtitle_file" in template:
+        subtitle_raw = template.get("output_subtitle_file")
+        subtitle_source_set = True
+    else:
+        subtitle_raw = None
+
+    if subtitle_source_set:
+        if subtitle_raw is None:
+            subtitle_name: Optional[str] = None
+        else:
+            subtitle_str = str(subtitle_raw).strip()
+            subtitle_name = subtitle_str or None
+    else:
         subtitle_name = f"subtitle-{story_name}-{timestamp}.json"
+
+    if subtitle_name and "{" in subtitle_name:
+        formatter_vars = {"timestamp": timestamp, "story": story_name}
+        try:
+            subtitle_name = subtitle_name.format(**formatter_vars)
+        except KeyError:
+            pass
 
     if args.ssh:
         login = parse_ssh_command(args.ssh)
@@ -657,6 +681,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "并行 worker 数量", default_workers if default_workers > 0 else 3, minimum=1
     )
 
+    if args.group_by_speaker is not None:
+        group_by_speaker = args.group_by_speaker
+    else:
+        runtime_group = runtime_template.get("group_by_speaker")
+        group_by_speaker = runtime_group if isinstance(runtime_group, bool) else True
+
     overrides = RuntimeOverrides(
         device=args.device,
         use_fp16=use_fp16,
@@ -666,6 +696,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         model_dir=args.model_dir,
         num_workers=num_workers,
         devices=args.devices,
+        group_by_speaker=group_by_speaker,
     )
 
     remote_paths = RemotePaths(

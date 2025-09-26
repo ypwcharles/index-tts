@@ -28,6 +28,7 @@ import stat
 PROJECT_BASE = Path("/Users/peiwenyang/Development/podcasts-test")
 DEFAULT_REMOTE_REPO = "/root/index-tts"
 DEFAULT_REMOTE_WORKDIR = "/root/autodl-fs/index-tts"
+DEFAULT_WHISPERX_PROJECT = "/root/autodl-fs/whisperX"
 STEP_ORDER = ["transcribe", "samples", "translate", "tts_prep", "synthesize"]
 
 
@@ -215,6 +216,7 @@ class RemoteConfig:
     password: Optional[str]
     remote_repo: str
     remote_workdir_base: str
+    whisperx_project: str
 
     def ssh_command(self) -> str:
         if self.port != 22:
@@ -398,7 +400,7 @@ class EpisodePipeline:
             "--remote-dir",
             f"{self.remote_cfg.remote_workdir_base}/whisperx",
             "--remote-project",
-            self.remote_cfg.remote_repo,
+            self.remote_cfg.whisperx_project or DEFAULT_WHISPERX_PROJECT,
         ]
         if self.remote_cfg.password:
             cmd.extend(["--password", self.remote_cfg.password])
@@ -719,22 +721,72 @@ class EpisodePipeline:
 def prompt_remote_config() -> RemoteConfig:
     print_header("配置远程连接")
     while True:
-        host_raw = prompt("远程主机 (可含端口，如 example.com:22774)")
-        if ":" in host_raw:
-            host, port_raw = host_raw.split(":", 1)
+        # 支持直接粘贴完整 SSH 指令
+        ssh_raw = prompt(
+            "SSH 登录指令（如: ssh -p 34672 root@example.com，可留空）",
+            default="",
+            allow_empty=True,
+        )
+
+        host = ""
+        user = ""
+        port = 22
+        if ssh_raw:
             try:
-                port = int(port_raw)
-            except ValueError:
-                print("端口需为数字。")
+                tokens = shlex.split(ssh_raw)
+                if tokens and tokens[0] == "ssh":
+                    tokens = tokens[1:]
+                idx = 0
+                while idx < len(tokens):
+                    t = tokens[idx]
+                    if t == "-p":
+                        idx += 1
+                        if idx >= len(tokens):
+                            raise ValueError("-p 后缺少端口号。")
+                        port = int(tokens[idx])
+                    elif t.startswith("-"):
+                        # 其它参数忽略（容错）
+                        pass
+                    else:
+                        spec = t
+                        if "@" in spec:
+                            user, host = spec.split("@", 1)
+                        else:
+                            host = spec
+                    idx += 1
+                if not host:
+                    raise ValueError("未解析到目标主机。")
+                if not user:
+                    user = getpass.getuser()
+            except Exception as exc:  # noqa: BLE001
+                print(f"无法解析 SSH 指令: {exc}")
                 continue
         else:
-            host = host_raw
-            port = 22
-        user = prompt("用户名", getpass.getuser())
+            host_raw = prompt("远程主机 (可含端口，如 example.com:22774)")
+            if ":" in host_raw:
+                host, port_raw = host_raw.split(":", 1)
+                try:
+                    port = int(port_raw)
+                except ValueError:
+                    print("端口需为数字。")
+                    continue
+            else:
+                host = host_raw
+            user = prompt("用户名", getpass.getuser())
+
         password = getpass.getpass("密码 (使用密钥登录可留空): ") or None
         repo = prompt("远程仓库路径", DEFAULT_REMOTE_REPO)
         workdir = prompt("远程工作根目录", DEFAULT_REMOTE_WORKDIR)
-        cfg = RemoteConfig(host=host, port=port, user=user, password=password, remote_repo=repo, remote_workdir_base=workdir)
+        wx_proj = prompt("WhisperX 项目目录", DEFAULT_WHISPERX_PROJECT)
+        cfg = RemoteConfig(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            remote_repo=repo,
+            remote_workdir_base=workdir,
+            whisperx_project=wx_proj,
+        )
         if yes_no("以上配置是否正确?", True):
             return cfg
 

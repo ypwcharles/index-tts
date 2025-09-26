@@ -1,11 +1,14 @@
 import argparse
+import io
 import json
 import os
 import queue
 import re
 import sys
+import threading
+import time
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torchaudio
@@ -46,11 +49,53 @@ class RuntimeConfig:
     verbose: bool
     num_workers: int
     worker_devices: Optional[List[str]]
+    group_by_speaker: bool
 
 
 def load_toml(path: str) -> Dict:
     with open(path, "rb") as handle:
         return tomllib.load(handle)
+
+
+def default_subtitle_filename(output_file: str) -> str:
+    base = os.path.splitext(os.path.basename(output_file))[0]
+    if not base:
+        base = "output"
+    return f"subtitle-{base}.json"
+
+
+class _PrefixedStream(io.TextIOBase):
+    def __init__(self, raw: io.TextIOBase, prefix: str) -> None:
+        super().__init__()
+        self._raw = raw
+        self._prefix = prefix
+        self._buffer = ""
+        self._lock = threading.Lock()
+
+    def write(self, data: str) -> int:  # type: ignore[override]
+        if not data:
+            return 0
+        data = data.replace("\r", "\n")
+        with self._lock:
+            self._buffer += data
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                self._raw.write(f"{self._prefix}{line}\n")
+        self._raw.flush()
+        return len(data)
+
+    def flush(self) -> None:  # type: ignore[override]
+        with self._lock:
+            if self._buffer:
+                self._raw.write(f"{self._prefix}{self._buffer}")
+                self._buffer = ""
+        self._raw.flush()
+
+    def close(self) -> None:  # type: ignore[override]
+        try:
+            self.flush()
+        finally:
+            super().close()
 
 
 def normalize_devices(value: Optional[Any]) -> Optional[List[str]]:
@@ -181,7 +226,25 @@ def build_runtime(config: Dict, args: argparse.Namespace) -> RuntimeConfig:
     runtime_cfg = config.get("runtime", {})
     output_dir = args.output_dir or config.get("output_dir") or "outputs"
     output_file = args.output_file or config.get("output_file") or "generated.wav"
-    subtitle_file = args.subtitle_file or config.get("output_subtitle_file")
+
+    if args.subtitle_file is not None:
+        subtitle_raw = args.subtitle_file
+        subtitle_source_set = True
+    elif "output_subtitle_file" in config:
+        subtitle_raw = config.get("output_subtitle_file")
+        subtitle_source_set = True
+    else:
+        subtitle_raw = None
+        subtitle_source_set = False
+
+    if subtitle_source_set:
+        if subtitle_raw is None:
+            subtitle_file = None
+        else:
+            subtitle_str = str(subtitle_raw).strip()
+            subtitle_file = subtitle_str or None
+    else:
+        subtitle_file = default_subtitle_filename(output_file)
 
     num_workers_raw = args.num_workers if args.num_workers is not None else runtime_cfg.get("num_workers", 1)
     try:
@@ -195,6 +258,14 @@ def build_runtime(config: Dict, args: argparse.Namespace) -> RuntimeConfig:
     worker_devices: Optional[List[str]] = None
     if devices_raw is not None:
         worker_devices = normalize_devices(devices_raw)
+
+    group_by_speaker_cfg = runtime_cfg.get("group_by_speaker")
+    if args.group_by_speaker is not None:
+        group_by_speaker = args.group_by_speaker
+    elif isinstance(group_by_speaker_cfg, bool):
+        group_by_speaker = group_by_speaker_cfg
+    else:
+        group_by_speaker = True
 
     return RuntimeConfig(
         cfg_path=runtime_cfg.get("cfg_path", "checkpoints/config.yaml"),
@@ -212,6 +283,7 @@ def build_runtime(config: Dict, args: argparse.Namespace) -> RuntimeConfig:
         verbose=args.verbose,
         num_workers=num_workers,
         worker_devices=worker_devices,
+        group_by_speaker=group_by_speaker,
     )
 
 
@@ -269,6 +341,15 @@ def _worker_main(
     worker_device: Optional[str],
     worker_id: int,
 ) -> None:
+    sys.stdout = _PrefixedStream(sys.stdout, f"[worker {worker_id}] ")
+    sys.stderr = _PrefixedStream(sys.stderr, f"[worker {worker_id}] ")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    try:
+        from transformers import logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+    except Exception:
+        pass
     try:
         worker_runtime = replace(runtime, device=worker_device)
         tts = instantiate_tts(worker_runtime)
@@ -292,14 +373,60 @@ def run_sequential(
     tasks: Sequence[Tuple[int, str, str]],
     voices: Dict[str, VoiceConfig],
     runtime: RuntimeConfig,
+    progress_cb: Optional[Callable[[int, int, torch.Tensor], None]] = None,
 ) -> Dict[int, Tuple[int, torch.Tensor]]:
     tts = instantiate_tts(runtime)
     results: Dict[int, Tuple[int, torch.Tensor]] = {}
     for idx, speaker, sentence in tasks:
         voice = voices[speaker]
         sr, audio = synthesize_segment(tts, voice, sentence, runtime)
-        results[idx] = (sr, audio.to(torch.float32))
+        audio = audio.to(torch.float32)
+        results[idx] = (sr, audio)
+        if progress_cb:
+            progress_cb(idx, sr, audio)
     return results
+
+
+def build_worker_partitions(
+    tasks: Sequence[Tuple[int, str, str]],
+    num_workers: int,
+    group_by_speaker: bool,
+) -> List[List[Tuple[int, str, str]]]:
+    if num_workers < 1:
+        num_workers = 1
+    partitions: List[List[Tuple[int, str, str]]] = [[] for _ in range(num_workers)]
+    if not tasks:
+        return partitions
+
+    if not group_by_speaker or num_workers == 1:
+        for idx, task in enumerate(tasks):
+            partitions[idx % num_workers].append(task)
+        for bucket in partitions:
+            bucket.sort(key=lambda item: item[0])
+        return partitions
+
+    speaker_tasks: Dict[str, List[Tuple[int, str, str]]] = {}
+    for task in tasks:
+        speaker_tasks.setdefault(task[1], []).append(task)
+
+    # compute weight per speaker: sum of character length to approximate workload
+    def speaker_weight(items: List[Tuple[int, str, str]]) -> int:
+        return sum(len(entry[2]) for entry in items)
+
+    ordered_speakers = sorted(
+        speaker_tasks.items(), key=lambda kv: speaker_weight(kv[1]), reverse=True
+    )
+
+    loads = [0] * num_workers
+    for speaker, items in ordered_speakers:
+        target_worker = min(range(num_workers), key=lambda w: loads[w])
+        partitions[target_worker].extend(items)
+        loads[target_worker] += speaker_weight(items)
+
+    for bucket in partitions:
+        bucket.sort(key=lambda item: item[0])
+
+    return partitions
 
 
 def run_parallel(
@@ -307,9 +434,9 @@ def run_parallel(
     voices: Dict[str, VoiceConfig],
     runtime: RuntimeConfig,
     num_workers: int,
+    progress_cb: Optional[Callable[[int, int, torch.Tensor], None]] = None,
 ) -> Dict[int, Tuple[int, torch.Tensor]]:
     mp.set_start_method("spawn", force=True)
-    task_queue: mp.Queue = mp.Queue()
     result_queue: mp.Queue = mp.Queue()
     error_queue: mp.Queue = mp.Queue()
 
@@ -317,8 +444,22 @@ def run_parallel(
     if worker_devices:
         print(f"worker 设备分配: {', '.join(worker_devices)}")
 
+    partitions = build_worker_partitions(tasks, num_workers, runtime.group_by_speaker)
+
+    for worker_idx, bucket in enumerate(partitions):
+        if not bucket:
+            print(f"worker {worker_idx}: 无任务")
+            continue
+        speakers = sorted({item[1] for item in bucket})
+        print(
+            f"worker {worker_idx}: 片段 {len(bucket)} 个，涉及说话人 {', '.join(speakers)}"
+        )
+
     processes: List[mp.Process] = []
+    task_queues: List[mp.Queue] = []
     for worker_idx in range(num_workers):
+        task_queue: mp.Queue = mp.Queue()
+        task_queues.append(task_queue)
         device = worker_devices[worker_idx % len(worker_devices)] if worker_devices else None
         process = mp.Process(
             target=_worker_main,
@@ -327,11 +468,11 @@ def run_parallel(
         process.start()
         processes.append(process)
 
-    for payload in tasks:
-        task_queue.put(payload)
-
-    for _ in processes:
-        task_queue.put(None)
+    for worker_idx, worker_tasks in enumerate(partitions):
+        queue_obj = task_queues[worker_idx]
+        for payload in worker_tasks:
+            queue_obj.put(payload)
+        queue_obj.put(None)
 
     results: Dict[int, Tuple[int, torch.Tensor]] = {}
     remaining = len(tasks)
@@ -346,6 +487,8 @@ def run_parallel(
                 raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
             continue
         results[idx] = (sr, audio)
+        if progress_cb:
+            progress_cb(idx, sr, audio)
         remaining -= 1
         if not error_queue.empty():
             worker_id, message, tb = error_queue.get()
@@ -481,6 +624,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--devices",
         help="逗号分隔的 worker 设备列表，如 cuda:0,cuda:1；缺省时复用 --device 或自动判定",
     )
+    parser.add_argument("--group-by-speaker", dest="group_by_speaker", action="store_true", help="按说话人聚合任务，默认开启")
+    parser.add_argument("--no-group-by-speaker", dest="group_by_speaker", action="store_false", help="禁用说话人聚合")
+    parser.set_defaults(group_by_speaker=None)
     return parser.parse_args(argv)
 
 
@@ -497,6 +643,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     print(f"共 {total_segments} 个片段待合成。")
 
     tasks: List[Tuple[int, str, str]] = []
+    task_info: Dict[int, Dict[str, Any]] = {}
+    total_chars = 0
     for idx, (speaker, sentence) in enumerate(story, start=1):
         if speaker not in voices:
             raise KeyError(f"文本中出现未知说话人 {speaker}")
@@ -505,13 +653,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             preview = preview[:77] + "..."
         print(f"[{idx}/{total_segments}] {speaker}: {preview}")
         tasks.append((idx, speaker, sentence))
+        char_count = len(sentence)
+        task_info[idx] = {"speaker": speaker, "text": sentence, "chars": char_count}
+        total_chars += char_count
+
+    progress_state = {"completed": 0, "chars": 0, "audio_seconds": 0.0}
+    overall_start = time.time()
+
+    def progress_cb(idx: int, sr: int, audio: torch.Tensor) -> None:
+        info = task_info.get(idx)
+        progress_state["completed"] += 1
+        if info:
+            progress_state["chars"] += info.get("chars", 0)
+        if sr > 0:
+            progress_state["audio_seconds"] += audio.shape[-1] / float(sr)
+        elapsed = time.time() - overall_start
+        percent = (progress_state["completed"] / total_segments) * 100.0 if total_segments else 100.0
+        chars_str = (
+            f"{progress_state['chars']}/{total_chars}"
+            if total_chars
+            else "0/0"
+        )
+        audio_len = progress_state["audio_seconds"]
+        rtf = (elapsed / audio_len) if audio_len > 0 else None
+        rtf_str = f"{rtf:.2f}" if rtf is not None else "N/A"
+        print(
+            f"[progress] {progress_state['completed']}/{total_segments} ({percent:.1f}%) | chars {chars_str} | "
+            f"audio {audio_len:.1f}s | elapsed {elapsed:.1f}s | RTF {rtf_str}",
+            flush=True,
+        )
 
     num_workers = max(1, runtime.num_workers)
     if num_workers > 1:
         print(f"启用并行模式，worker 数量: {num_workers}")
-        results = run_parallel(tasks, voices, runtime, num_workers)
+        results = run_parallel(tasks, voices, runtime, num_workers, progress_cb=progress_cb)
     else:
-        results = run_sequential(tasks, voices, runtime)
+        results = run_sequential(tasks, voices, runtime, progress_cb=progress_cb)
 
     final_audio, sampling_rate, subtitles = assemble_segments(tasks, results, runtime)
 
@@ -532,7 +709,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"字幕已保存: {subtitle_path}")
 
     total_seconds = final_audio.shape[-1] / sampling_rate
+    total_elapsed = time.time() - overall_start
     print(f"总时长: {total_seconds:.2f} 秒，片段数量: {len(story)}")
+    print(
+        f"合成耗时: {total_elapsed:.2f} 秒；纯语音时长: {progress_state['audio_seconds']:.2f} 秒"
+    )
+    if total_seconds > 0:
+        overall_rtf = total_elapsed / total_seconds
+        print(f"整体 RTF: {overall_rtf:.2f}")
     return 0
 
 
