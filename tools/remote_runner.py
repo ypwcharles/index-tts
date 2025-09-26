@@ -636,10 +636,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             or detect_text_from_project(source_dir)
             or detect_any_text_file(source_dir)
         )
-        # 语音：优先本目录 speaker*.* -> 项目 samples/manifest.json -> samples/ 扫描
+        # 语音：合并三路来源，确保包含 samples/ 与 manifest.json 中的额外标签
         detected_voice_map = detect_voice_files(source_dir)
-        if not detected_voice_map:
-            detected_voice_map = detect_voices_from_project(source_dir) or {}
+        proj_voice_map = detect_voices_from_project(source_dir) or {}
+        for k, v in proj_voice_map.items():
+            detected_voice_map.setdefault(k, v)
         if not detected_voice_map:
             raise FileNotFoundError(
                 f"在目录 {source_dir} 及其 samples/ 中未找到命名为 speakerN.* (N 可为数字或字母) 的音频文件。"
@@ -826,7 +827,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         temp_files=temp_files,
     )
 
-    # 根据脚本中的标签重建 voices，使 story.toml 的 [voices.X] 与 script.txt 对齐
+    # 根据脚本中的标签重建 voices，并尝试补齐缺失的标签样本
     try:
         import re as _re
         raw_text = assets.text_path.read_text(encoding="utf-8")
@@ -851,6 +852,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return cand if cand in voices else None
             return None
 
+        # 在根目录与 samples/ 下尝试按标签名寻找音频文件
+        def _search_voice_file(tag: str) -> Optional[Path]:
+            exts = (".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac")
+            roots = [source_dir, source_dir / "samples"] if source_dir else []
+            for root in roots:
+                for ext in exts:
+                    p = (root / f"{tag}{ext}").expanduser().resolve()
+                    if p.is_file():
+                        return p
+            return None
+
         # 构造与脚本一致的 voices 映射（key=脚本标签，value=本地样本 Path）
         if used_tags:
             fallback_path = None
@@ -860,6 +872,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for tag in used_tags:
                 key = _norm_candidate(tag)
                 path = voices.get(key) if key else None
+                if path is None:
+                    # 尝试直接按标签名搜文件（支持 speakerY 等）
+                    p = _search_voice_file(tag)
+                    if p is not None:
+                        path = p
                 if path is None:
                     path = fallback_path
                 if path is not None:
