@@ -795,14 +795,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # 根据脚本中的标签重建 voices，并尝试补齐缺失的标签样本（必须在生成 story.toml 之前执行）
     try:
         import re as _re
-        raw_text = assets.text_path.read_text(encoding="utf-8")
+        # 注意：此处尚未创建 assets，直接使用 text_path
+        raw_text = text_path.read_text(encoding="utf-8")
         used_tags: List[str] = []
-        for ln in raw_text.splitlines():
-            m = _re.match(r"^\s*\[(?P<tag>[^\]]+)\]", ln)
-            if m:
-                tag = m.group("tag").strip()
-                if not used_tags or used_tags[-1] != tag:
-                    used_tags.append(tag)
+        # 全文扫描 [tag]，而不仅仅是行首，保持首次出现的顺序
+        for m in _re.finditer(r"\[(?P<tag>[^\]]+)\]", raw_text):
+            tag = m.group("tag").strip()
+            if tag not in used_tags:
+                used_tags.append(tag)
 
         def _norm_candidate(tag: str) -> Optional[str]:
             if tag in voices:
