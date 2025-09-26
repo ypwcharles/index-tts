@@ -437,10 +437,11 @@ def build_remote_config(
     template_voices = template.get("voices", {})
     for name, params in template_voices.items():
         voice_data = dict(params)
-        remote_audio = f"{remote.workdir}/{remote.timestamp}-{voices[name].name}"
+        # Include voice key in remote file to avoid collisions when多个标签复用同一文件
+        remote_audio = f"{remote.workdir}/{remote.timestamp}-{name}-{voices[name].name}"
         voice_data["ref_audio"] = remote_audio
         if voice_data.get("emo_audio"):
-            voice_data["emo_audio"] = f"{remote.workdir}/{remote.timestamp}-{Path(voice_data['emo_audio']).name}"
+            voice_data["emo_audio"] = f"{remote.workdir}/{remote.timestamp}-{name}-{Path(voice_data['emo_audio']).name}"
         voices_cfg[name] = voice_data
 
     data = config_data.copy()
@@ -825,41 +826,62 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         temp_files=temp_files,
     )
 
-    # 预处理文本：将脚本中未提供样本的说话人标签重写为已知标签（如存在 speaker0 优先，否则取第一个）
+    # 根据脚本中的标签重建 voices，使 story.toml 的 [voices.X] 与 script.txt 对齐
     try:
         import re as _re
+        raw_text = assets.text_path.read_text(encoding="utf-8")
+        used_tags: List[str] = []
+        for ln in raw_text.splitlines():
+            m = _re.match(r"^\s*\[(?P<tag>[^\]]+)\]", ln)
+            if m:
+                tag = m.group("tag").strip()
+                if not used_tags or used_tags[-1] != tag:
+                    used_tags.append(tag)
 
-        known_tags = set(voices.keys())
-        fallback_tag = "speaker0" if "speaker0" in known_tags else (next(iter(known_tags)) if known_tags else None)
-        if fallback_tag:
-            raw_text = text_path.read_text(encoding="utf-8")
-            used_tags: List[str] = []
-            def _collect(line: str) -> None:
-                m = _re.match(r"^\s*\[(?P<tag>[^\]]+)\]", line)
-                if m:
-                    used_tags.append(m.group("tag").strip())
-            for ln in raw_text.splitlines():
-                _collect(ln)
-            unknown = sorted({t for t in used_tags if t not in known_tags})
-            if unknown:
-                print(f"文本中存在未配置样本的标签: {', '.join(unknown)} -> 将重写为 {fallback_tag}")
-                def _rewrite_line(line: str) -> str:
-                    m = _re.match(r"^(\s*)\[(?P<tag>[^\]]+)\](?P<rest>.*)$", line)
-                    if not m:
-                        return line
-                    tag = m.group("tag").strip()
-                    if tag in known_tags:
-                        return line
-                    return f"{m.group(1)}[{fallback_tag}]{m.group('rest')}"
-                rewritten = "\n".join(_rewrite_line(ln) for ln in raw_text.splitlines())
-                tmp_fd, tmp_name = tempfile.mkstemp(prefix="story_text_", suffix=".txt")
-                os.close(tmp_fd)
-                rewritten_path = Path(tmp_name)
-                rewritten_path.write_text(rewritten, encoding="utf-8")
-                assets.text_path = rewritten_path
-                assets.temp_files.append(rewritten_path)
+        def _norm_candidate(tag: str) -> Optional[str]:
+            if tag in voices:
+                return tag
+            m = _re.match(r"^\s*speaker\s*[-_]?\s*(\d+)\s*$", tag, flags=_re.IGNORECASE)
+            if m:
+                cand = f"speaker{int(m.group(1))}"
+                return cand if cand in voices else None
+            m = _re.match(r"^\s*speaker\s*[-_]?\s*([A-Za-z]+)\s*$", tag, flags=_re.IGNORECASE)
+            if m:
+                cand = f"speaker{m.group(1)}"
+                return cand if cand in voices else None
+            return None
+
+        # 构造与脚本一致的 voices 映射（key=脚本标签，value=本地样本 Path）
+        if used_tags:
+            fallback_path = None
+            if voices:
+                fallback_path = voices.get("speaker0") or next(iter(voices.values()))
+            aligned: "OrderedDict[str, Path]" = OrderedDict()
+            for tag in used_tags:
+                key = _norm_candidate(tag)
+                path = voices.get(key) if key else None
+                if path is None:
+                    path = fallback_path
+                if path is not None:
+                    aligned[tag] = path
+            if aligned:
+                print("根据脚本重建 voices: ", ", ".join(aligned.keys()))
+                # 用脚本标签顺序覆盖 voices 与 template["voices"]
+                voices = aligned
+                voice_section = OrderedDict()
+                for name, path in voices.items():
+                    voice_section[name] = {"ref_audio": path.name, "ref_text": ""}
+                template["voices"] = voice_section
+                # 更新 assets 中的 voices 引用
+                assets = LocalAssets(
+                    config_path=assets.config_path,
+                    text_path=assets.text_path,
+                    voices=voices,
+                    output_dir=assets.output_dir,
+                    temp_files=assets.temp_files,
+                )
     except Exception as _exc:
-        print(f"[warn] 文本重写过程出现问题（忽略并继续）：{_exc}")
+        print(f"[warn] 无法按脚本重建 voices（忽略并继续）：{_exc}")
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -879,7 +901,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             remote_paths.text_path: assets.text_path,
         }
         for voice_name, local_voice in voices.items():
-            remote_voice_path = f"{remote_paths.workdir}/{remote_paths.timestamp}-{local_voice.name}"
+            remote_voice_path = f"{remote_paths.workdir}/{remote_paths.timestamp}-{voice_name}-{local_voice.name}"
             upload_map[remote_voice_path] = local_voice
         upload_files(sftp, upload_map)
 
