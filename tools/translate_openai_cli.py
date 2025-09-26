@@ -84,7 +84,12 @@ def parse_args() -> argparse.Namespace:
         default=65000,
         help="Max tokens for response (default: 65000)",
     )
-    p.add_argument("--timeout", type=int, default=300, help="HTTP timeout seconds")
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="HTTP timeout seconds (default: 600)",
+    )
     # JSON handling
     p.add_argument("--emit-json", action="store_true", help="Expect and save JSON output based on the prompt's schema")
     p.add_argument("--json-output", type=Path, help="Where to write the raw JSON response (if --emit-json)")
