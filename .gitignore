@@ -32,3 +32,6 @@ desktop.ini
 
 # WhisperX config
 tools/whisperx.env
+
+# Translator env (do not commit)
+tools/openai_translator.env
