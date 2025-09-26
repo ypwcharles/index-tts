@@ -486,6 +486,8 @@ class EpisodePipeline:
 
         prefix = (
             f"cd {shlex.quote(self.remote_cfg.remote_repo)} && "
+            # 确保 uv 在 PATH 中（覆盖常见安装路径）
+            "export PATH=\"$HOME/.local/bin:/usr/local/bin:/root/miniconda3/bin:/opt/conda/bin:$PATH\" && "
             "(source /etc/network_turbo >/dev/null 2>&1 || true)"
         )
         command = (
@@ -571,6 +573,8 @@ class EpisodePipeline:
 
         prefix = (
             f"cd {shlex.quote(self.remote_cfg.remote_repo)} && "
+            # 确保 uv 在 PATH 中（覆盖常见安装路径）
+            "export PATH=\"$HOME/.local/bin:/usr/local/bin:/root/miniconda3/bin:/opt/conda/bin:$PATH\" && "
             "(source /etc/network_turbo >/dev/null 2>&1 || true)"
         )
         command = (
