@@ -12,13 +12,17 @@ import argparse
 import sys
 import json
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
+import subprocess as _subprocess
 from pathlib import Path
 from statistics import mean
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import random
 import concurrent.futures as _futures
+import tempfile
+import shutil
 
 import numpy as np
 
@@ -122,6 +126,44 @@ def parse_args() -> argparse.Namespace:
         help="Allow exporting clips outside the duration bounds if no valid candidate exists",
     )
     parser.add_argument("--verbose", action="store_true", help="Print ffmpeg output and extra diagnostics")
+    # 智能 CLI 介入：允许外部 CLI（如 Codex/Gemini）在失败时给出参数建议
+    parser.add_argument(
+        "--assistant-cmd",
+        help="当未选出样本时调用的外部命令，接收 JSON 上下文（stdin）并输出新参数 JSON（stdout）",
+    )
+    parser.add_argument(
+        "--assistant-engine",
+        choices=["none", "external", "codex"],
+        default="none",
+        help="智能助手模式：none(关闭)、external(使用 --assistant-cmd)、codex(使用 Codex CLI)",
+    )
+    parser.add_argument(
+        "--assistant-codex-flags",
+        default="--full-auto",
+        help="传递给 codex exec 的额外标志，例如: '--full-auto' 或 '--dangerously-bypass-approvals-and-sandbox'",
+    )
+    parser.add_argument(
+        "--assistant-codex-model",
+        default=None,
+        help="可选：指定 Codex 模型名 (-m)。例如 gpt-4.1 或 gpt-5",
+    )
+    parser.add_argument(
+        "--assistant-codex-workdir",
+        type=Path,
+        default=None,
+        help="运行 codex 的工作目录 (-C)。默认自动检测为仓库根目录或当前工作目录",
+    )
+    parser.add_argument(
+        "--assistant-timeout",
+        type=int,
+        default=180,
+        help="外部助手命令超时时间（秒）",
+    )
+    parser.add_argument(
+        "--assistant-log",
+        type=Path,
+        help="记录助手交互的 JSON（请求/响应）便于审计与复现",
+    )
     # 性能与再生成控制
     parser.add_argument(
         "--workers",
@@ -968,6 +1010,229 @@ def main() -> None:
         avoid_min_overlap=args.avoid_min_overlap,
         sample_top_k=args.sample_top_k,
     )
+
+    def _has_any_selection(g: Dict[str, Dict[str, List[Candidate]]]) -> bool:
+        for _, bundle in g.items():
+            if bundle.get("selected"):
+                return True
+        return False
+
+    def _detect_repo_root() -> Path:
+        """Best-effort detect project root for Codex -C; fallback to CWD."""
+        here = Path.cwd()
+        try:
+            result = _subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            root = Path(result.stdout.strip())
+            if root.is_dir():
+                return root
+        except Exception:
+            pass
+        # fallback to repo root heuristic: two-level up from this file
+        return Path(__file__).resolve().parents[1]
+
+    def _build_codex_prompt(ctx: Dict[str, object]) -> str:
+        ctx_json = json.dumps(ctx, ensure_ascii=False, indent=2)
+        guide = (
+            "你是语音样本提取助手。给定 WhisperX 分段与候选统计，\n"
+            "请仅返回一个 JSON，键为 params，值为建议的参数集合。\n\n"
+            "目标：\n"
+            "- 为每个说话人选出高质量、干净、时长合适(默认6-12s，目标8s)的语音片段；\n"
+            "- 提高语音占比(speech_ratio)、降低背景音乐(bgm_score)，避开片头/尾；\n"
+            "- 不要给出解释性文本，不要输出除 JSON 外的任何内容。\n\n"
+            "可调整的参数键（按需提供）：\n"
+            "min_start, skip_head, hard_skip_tail, min_duration, max_duration, target_duration, max_gap, \n"
+            "per_speaker, min_speech_ratio, bgm_threshold, vad_aggressiveness, allow_out_of_range, sample_top_k, afilter\n\n"
+            "若需要启用降噪/均衡，可建议 afilter，例如：\n"
+            "'highpass=f=80,lowpass=f=8000,afftdn=nf=-28' 或 'highpass=f=100,lowpass=f=7500'。\n\n"
+            "输入(JSON)：\n"
+        )
+        tail = (
+            "\n\n输出(JSON 仅此一行)：\n"
+            "{\n  \"params\": { ... }\n}"
+        )
+        return f"{guide}{ctx_json}{tail}"
+
+    def _assistant_suggest() -> bool:
+        """Call assistant (codex/external) to suggest new params; return True if applied and improved."""
+        context: Dict[str, object] = {
+            "audio": str(args.audio),
+            "metadata": str(args.metadata),
+            "audio_duration": audio_duration,
+            "speakers": sorted(list(speakers.keys())),
+            "params": {
+                "min_start": args.min_start,
+                "skip_head": args.skip_head,
+                "hard_skip_tail": args.hard_skip_tail,
+                "min_duration": args.min_duration,
+                "max_duration": args.max_duration,
+                "target_duration": args.target_duration,
+                "max_gap": args.max_gap,
+                "per_speaker": args.per_speaker,
+                "min_speech_ratio": args.min_speech_ratio,
+                "bgm_threshold": args.bgm_threshold,
+                "vad_aggressiveness": args.vad_aggressiveness,
+                "allow_out_of_range": args.allow_out_of_range,
+                "sample_top_k": args.sample_top_k,
+            },
+            "candidates_per_speaker": {k: len(v) for k, v in candidates.items()},
+        }
+        if args.assistant_log:
+            try:
+                log = {"request": context}
+                args.assistant_log.parent.mkdir(parents=True, exist_ok=True)
+                args.assistant_log.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+        reply: Optional[dict] = None
+        if args.assistant_engine == "codex":
+            print("[assistant] 使用 Codex CLI 生成参数建议…")
+            # 组装 codex exec 命令
+            flags = shlex.split(args.assistant_codex_flags or "")
+            workdir = args.assistant_codex_workdir or _detect_repo_root()
+            cmd: List[str] = ["codex", "exec", *flags, "-C", str(workdir)]
+            if args.assistant_codex_model:
+                cmd.extend(["-m", str(args.assistant_codex_model)])
+            # 从 stdin 读取 prompt
+            # 将最后一条回复写入临时文件，避免解析额外日志
+            with tempfile.NamedTemporaryFile(prefix="codex_assistant_", suffix=".json", delete=False) as tf:
+                tmp_path = Path(tf.name)
+            cmd.extend(["-", "--output-last-message", str(tmp_path)])
+            prompt = _build_codex_prompt(context)
+            try:
+                proc = _subprocess.run(
+                    cmd,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=max(10, int(args.assistant_timeout)),
+                )
+            except Exception as exc:
+                print(f"[assistant] Codex 执行失败: {exc}")
+                return False
+            if proc.returncode != 0:
+                print(f"[assistant] Codex 返回非零码: {proc.returncode}\n{proc.stderr}")
+                try:
+                    tmp_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+                return False
+            try:
+                raw = tmp_path.read_text(encoding="utf-8")
+                reply = json.loads(raw)
+            except Exception as exc:
+                print(f"[assistant] 无法解析 Codex 最终输出为 JSON: {exc}")
+                return False
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)  # type: ignore[arg-type]
+                except Exception:
+                    pass
+        elif args.assistant_engine == "external" or args.assistant_cmd:
+            # 兼容外部助手命令：从 stdin 接收 JSON 上下文，stdout 输出 JSON
+            print("[assistant] 调用外部助手以获取参数建议…")
+            req = json.dumps(context, ensure_ascii=False)
+            try:
+                proc = _subprocess.run(
+                    args.assistant_cmd,
+                    input=req,
+                    text=True,
+                    capture_output=True,
+                    timeout=max(10, int(args.assistant_timeout)),
+                    shell=True,
+                )
+            except Exception as exc:
+                print(f"[assistant] 外部助手执行失败: {exc}")
+                return False
+            if proc.returncode != 0:
+                print(f"[assistant] 外部助手返回非零码: {proc.returncode}\n{proc.stderr}")
+                return False
+            try:
+                reply = json.loads(proc.stdout)
+            except Exception as exc:
+                print(f"[assistant] 无法解析助手输出为 JSON: {exc}")
+                return False
+        else:
+            # 未开启助手
+            return False
+
+        if args.assistant_log and reply is not None:
+            try:
+                log = json.loads(args.assistant_log.read_text(encoding="utf-8"))
+                log["response"] = reply
+                args.assistant_log.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        if reply is None:
+            return False
+        params = reply.get("params") if isinstance(reply, dict) else None
+        if not isinstance(params, dict):
+            print("[assistant] 响应中未找到 params dict，忽略。")
+            return False
+        # 应用建议参数
+        def _maybe(name: str, cast):
+            if name in params:
+                try:
+                    setattr(args, name, cast(params[name]))
+                    print(f"[assistant] 应用建议: {name} -> {getattr(args, name)}")
+                except Exception:
+                    print(f"[assistant] 忽略无效建议: {name}={params.get(name)!r}")
+        _maybe("min_start", float)
+        _maybe("skip_head", float)
+        _maybe("hard_skip_tail", float)
+        _maybe("min_duration", float)
+        _maybe("max_duration", float)
+        _maybe("target_duration", float)
+        _maybe("max_gap", float)
+        _maybe("per_speaker", int)
+        _maybe("min_speech_ratio", float)
+        _maybe("bgm_threshold", float)
+        _maybe("vad_aggressiveness", int)
+        if "allow_out_of_range" in params:
+            setattr(args, "allow_out_of_range", bool(params["allow_out_of_range"]))
+            print(f"[assistant] 应用建议: allow_out_of_range -> {args.allow_out_of_range}")
+        _maybe("sample_top_k", int)
+
+        # 重新构建候选与打分（保留已计算的 audio_features，更新打分与筛选阈值）
+        for c in all_cands:
+            score_candidate(
+                c,
+                target_duration=args.target_duration,
+                audio_duration=audio_duration,
+                skip_head=args.skip_head,
+                skip_tail=args.skip_tail,
+                hard_skip_tail=args.hard_skip_tail,
+                min_duration=args.min_duration,
+                max_duration=args.max_duration,
+            )
+        nonlocal_grouped = pick_top(
+            candidates,
+            per_speaker=args.per_speaker,
+            extra=args.extra_candidates,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            allow_out_of_range=args.allow_out_of_range,
+            min_speech_ratio=args.min_speech_ratio,
+            bgm_threshold=args.bgm_threshold,
+            avoid_map=avoid_map,
+            avoid_min_overlap=args.avoid_min_overlap,
+            sample_top_k=args.sample_top_k,
+        )
+        if _has_any_selection(nonlocal_grouped):
+            nonlocal grouped
+            grouped = nonlocal_grouped
+            print("[assistant] 新参数生效，已选出样本。")
+            return True
+        print("[assistant] 应用建议后仍未选出样本。")
+        return False
+
+    if not _has_any_selection(grouped):
+        _assistant_suggest()
 
     manifest_clips: List[dict] = []
     # 供下游快速消费的摘要：每个说话人的已导出样本文件与备选

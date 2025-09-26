@@ -307,9 +307,12 @@ class EpisodePipeline:
         raw_dir = self.state.root / "raw"
         candidates = sorted(raw_dir.glob("*"))
         if candidates:
-            choices = [path.name for path in candidates]
-            idx = choose("选择要处理的音频", choices, 0)
-            audio = candidates[idx]
+            if self.dry_run:
+                audio = candidates[0]
+            else:
+                choices = [path.name for path in candidates]
+                idx = choose("选择要处理的音频", choices, 0)
+                audio = candidates[idx]
         else:
             while True:
                 src = Path(prompt("请输入音频文件路径"))
@@ -342,9 +345,10 @@ class EpisodePipeline:
                 if self.state.step(name).status != "done":
                     start_index = i
                     break
-            # 允许用户覆盖默认选择
-            print_header("选择起始步骤")
-            start_index = choose("从哪一步开始重新执行?", step_names_cn, default_index=start_index)
+            # 允许用户覆盖默认选择（dry-run 下跳过交互，直接使用默认）
+            if not self.dry_run:
+                print_header("选择起始步骤")
+                start_index = choose("从哪一步开始重新执行?", step_names_cn, default_index=start_index)
 
         # 无论当前状态如何，按选择的起点将该步及其后的状态重置为 pending，确保可重新执行
         chosen_step = STEP_ORDER[start_index]
@@ -357,16 +361,18 @@ class EpisodePipeline:
                 if info.status == "done":
                     break
                 if info.status == "failed":
-                    if not yes_no(f"步骤 {step} 上次失败，是否重试?", True):
-                        break
+                    if not self.dry_run:
+                        if not yes_no(f"步骤 {step} 上次失败，是否重试?", True):
+                            break
                     info.status = "pending"
                     info.meta.clear()
                     info.updated_at = None
                     self.state.save()
                 elif info.status == "pending":
-                    if not yes_no(f"是否执行步骤 {step}?", True):
-                        print(f"跳过步骤 {step}，保持待执行状态。")
-                        break
+                    if not self.dry_run:
+                        if not yes_no(f"是否执行步骤 {step}?", True):
+                            print(f"跳过步骤 {step}，保持待执行状态。")
+                            break
 
                 try:
                     if step == "transcribe":
@@ -513,17 +519,12 @@ class EpisodePipeline:
         info.mark("running")
         self.state.save()
 
-        run_remote = self.state.remote.get("whisperx_run_dir")
         local_handoff = self._load_latest_handoff()
-        diar_json = local_handoff.get("best", {}).get("diarization_json")
-        audio_remote = self.state.remote.get("audio_remote")
-        if not run_remote or not diar_json:
-            raise PipelineError("缺少 WhisperX 运行信息，无法提取样本")
+        diar_json_local = Path(local_handoff.get("best", {}).get("diarization_json") or "")
+        audio_local = Path(local_handoff.get("audio") or "")
+        if not diar_json_local.is_file() or not audio_local.is_file():
+            raise PipelineError("缺少本地 WhisperX 产物 (音频/JSON)")
 
-        remote_json = f"{run_remote}/{Path(diar_json).name}"
-        # 统一到项目根目录下: /root/autodl-fs/outputs/<episode>/samples
-        remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
-        remote_samples_dir = f"{remote_episode_base}/samples"
         local_samples = self.state.root / "samples"
         if local_samples.exists():
             for entry in local_samples.iterdir():
@@ -581,61 +582,144 @@ class EpisodePipeline:
             print("[dry-run] 样本生成完成 (模拟)。")
             return
 
-        def _extract_with_flags(extra: str = "") -> Path:
-            cleanup_cmd = (
-                f"rm -rf {shlex.quote(remote_samples_dir)} && "
-                f"mkdir -p {shlex.quote(remote_samples_dir)}"
-            )
-            code, _ = self.remote.run(cleanup_cmd)
-            if code != 0:
-                raise PipelineError("远程样本目录准备失败")
+        # 启动并发：本地翻译（不依赖已选样本，仅按说话人映射改写标签）
+        # 读取说话人映射以便翻译脚本中统一使用 speakerX 标签
+        spk_map = {}
+        try:
+            spk_map = dict(local_handoff.get("speakers", {}).get("raw_to_tag", {}))
+        except Exception:
+            spk_map = {}
 
-            prefix = (
-                f"cd {shlex.quote(self.remote_cfg.remote_repo)} && "
-                # 确保 uv 在 PATH 中（覆盖常见安装路径）
-                "export PATH=\"$HOME/.local/bin:/usr/local/bin:/root/miniconda3/bin:/opt/conda/bin:$PATH\" && "
-                "(source /etc/network_turbo >/dev/null 2>&1 || true)"
-            )
-            command = (
-                f"{prefix} && uv run python tools/extract_speaker_samples.py "
-                f"{shlex.quote(audio_remote)} {shlex.quote(remote_json)} "
-                f"--output-dir {shlex.quote(remote_samples_dir)} "
-                f"--manifest {shlex.quote(remote_samples_dir + '/manifest.json')} "
-                f"--preset {shlex.quote(preset)} --per-speaker {per_speaker} --workers 4 "
-                f"{extra}"
-            )
-            print("远程执行样本提取:")
-            print(command)
-            exit_code, _ = self.remote.run(command)
-            if exit_code != 0:
-                raise PipelineError("远程样本提取失败")
+        translate_thread: Optional[threading.Thread] = None
+        translate_ok = {"ok": False, "script": None, "analysis": None}
 
-            self.remote.download_dir(remote_samples_dir, local_samples)
-            mpath = local_samples / "manifest.json"
-            if not mpath.is_file():
-                raise PipelineError("未找到样本 manifest.json")
-            return mpath
+        def _run_local_translate_background() -> None:
+            # 目标目录: <episode>/translate
+            local_translate = self.state.root / "translate"
+            local_translate.mkdir(parents=True, exist_ok=True)
+            for entry in list(local_translate.iterdir()):
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            transcript_local = local_handoff.get("best", {}).get("transcript_txt")
+            if not transcript_local or not Path(transcript_local).is_file():
+                # 极端情况：按远端命名惯例在本地查找
+                transcript_local = str(self.state.root / "whisperx" / Path(diar_json_local).with_suffix(".txt").name)
+            cmd_local: List[str] = [
+                sys.executable,
+                "tools/translate_openai_cli.py",
+                "--env",
+                "tools/openai_translator.env",
+                "--input",
+                str(transcript_local),
+                "--output",
+                str(local_translate / "translation.json"),
+                "--emit-json",
+                "--json-output",
+                str(local_translate / "translation.json"),
+                "--script-out",
+                str(local_translate / "script.txt"),
+                "--analysis-out",
+                str(local_translate / "analysis.md"),
+            ]
+            # 翻译参数（与 step_translate 保持一致）
+            params = self.state.params.setdefault("translate", {})
+            temperature = params.get("temperature", "0.2")
+            model = params.get("model", "")
+            cmd_local.extend(["--temperature", str(temperature)])
+            if model:
+                cmd_local.extend(["--model", str(model)])
+            # 统一标签
+            for old, new in spk_map.items():
+                cmd_local.extend(["--rewrite-speaker", f"{old}={new}"])
+            print("并发执行本地翻译:")
+            print(" ".join(shlex.quote(p) for p in cmd_local))
+            res = subprocess.run(cmd_local, cwd=str(Path.cwd()), text=True)
+            if res.returncode == 0:
+                translate_ok["ok"] = True
+                translate_ok["script"] = str(local_translate / "script.txt")
+                translate_ok["analysis"] = str(local_translate / "analysis.md")
 
-        # 首次尝试
-        manifest_path = _extract_with_flags()
+        # 仅在非 dry-run 下并发
+        if not self.dry_run:
+            translate_thread = threading.Thread(target=_run_local_translate_background, daemon=True)
+            translate_thread.start()
+
+        # 本地执行样本提取（首次尝试）
+        local_samples.mkdir(parents=True, exist_ok=True)
+        manifest_path = local_samples / "manifest.json"
+        cmd_extract = [
+            sys.executable,
+            "tools/extract_speaker_samples.py",
+            str(audio_local),
+            str(diar_json_local),
+            "--output-dir",
+            str(local_samples),
+            "--manifest",
+            str(manifest_path),
+            "--preset",
+            str(preset),
+            "--per-speaker",
+            str(per_speaker),
+            "--workers",
+            "4",
+        ]
+        print("本地执行样本提取:")
+        print(" ".join(shlex.quote(p) for p in cmd_extract))
+        res1 = subprocess.run(cmd_extract, cwd=str(Path.cwd()), text=True)
+        if res1.returncode != 0 or not manifest_path.is_file():
+            raise PipelineError("本地样本提取失败")
+
         summary = self._load_samples_summary(manifest_path)
         if not (summary.get("speakers") or []):
-            print("[warn] 首次样本提取未找到可用片段，尝试以宽松参数重试…")
-            fallback = (
-                "--min-start 0 --skip-head 0 --hard-skip-tail 0 "
-                "--min-speech-ratio 0.6 --bgm-threshold 0.7 --allow-out-of-range"
-            )
-            origin_preset = preset
-            preset = "relaxed"
-            manifest_path = _extract_with_flags(fallback)
+            print("[warn] 首次样本提取未找到可用片段，将调用 Codex 提供调参建议后重试…")
+            # 使用 Codex 辅助调参并重试
+            cmd_extract_codex = cmd_extract + [
+                "--assistant-engine",
+                "codex",
+                "--assistant-codex-flags",
+                "--full-auto",
+                "--assistant-timeout",
+                "300",
+                "--assistant-log",
+                str(local_samples / "assistant_log.json"),
+            ]
+            print("Codex 辅助样本提取:")
+            print(" ".join(shlex.quote(p) for p in cmd_extract_codex))
+            res2 = subprocess.run(cmd_extract_codex, cwd=str(Path.cwd()), text=True)
+            if res2.returncode != 0 or not manifest_path.is_file():
+                print("[warn] Codex 重试失败，尝试使用宽松参数再试一次…")
+                cmd_relaxed = cmd_extract + [
+                    "--min-start",
+                    "0",
+                    "--skip-head",
+                    "0",
+                    "--hard-skip-tail",
+                    "0",
+                    "--min-speech-ratio",
+                    "0.6",
+                    "--bgm-threshold",
+                    "0.7",
+                    "--preset",
+                    "relaxed",
+                ]
+                res3 = subprocess.run(cmd_relaxed, cwd=str(Path.cwd()), text=True)
+                if res3.returncode != 0 or not manifest_path.is_file():
+                    raise PipelineError("样本提取在多次尝试后仍失败")
+            # 重新读取 summary
             summary = self._load_samples_summary(manifest_path)
-            if not (summary.get("speakers") or []):
-                preset = origin_preset
-                print("[warn] 宽松重试仍无样本，请检查音频与分离结果，或稍后手动提供样本文件。")
-        self.state.remote["samples_dir"] = remote_samples_dir
+
+        # 等待并发翻译完成（若仍在进行）
+        if translate_thread is not None:
+            translate_thread.join(timeout=5 * 60)
+
+        # 标记样本步骤完成并确认
+        self.state.remote["samples_dir"] = str(local_samples)
         info.mark("done", manifest=str(manifest_path))
         self.state.save()
         self._confirm_samples(summary, local_samples)
+        # 翻译由下一步进行确认；若并发已生成译稿，step_translate 将自动复用
 
     def _load_samples_summary(self, manifest_path: Path) -> Dict:
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -667,6 +751,16 @@ class EpisodePipeline:
         info.mark("running")
         self.state.save()
 
+        # 如果并发阶段已在本地生成译稿，直接进入确认环节
+        pre_local = self.state.root / "translate"
+        pre_script = pre_local / "script.txt"
+        pre_analysis = pre_local / "analysis.md"
+        if pre_script.is_file():
+            info.mark("done", script=str(pre_script))
+            self.state.save()
+            self._confirm_translation(pre_script, pre_analysis)
+            return
+
         handoff = self._load_latest_handoff()
         transcript = handoff.get("best", {}).get("transcript_txt")
         remote_run = self.state.remote.get("whisperx_run_dir")
@@ -678,16 +772,18 @@ class EpisodePipeline:
         # 统一到项目根目录下: /root/autodl-fs/outputs/<episode>/translate
         remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
         remote_out_dir = f"{remote_episode_base}/translate"
-        code, _ = self.remote.run(
-            f"rm -rf {shlex.quote(remote_out_dir)} && mkdir -p {shlex.quote(remote_out_dir)}"
-        )
-        if code != 0:
-            raise PipelineError("远程翻译目录准备失败")
+        code = 0
+        if not self.dry_run:
+            code, _ = self.remote.run(
+                f"rm -rf {shlex.quote(remote_out_dir)} && mkdir -p {shlex.quote(remote_out_dir)}"
+            )
+            if code != 0:
+                print("[warn] 远程翻译目录准备失败，将尝试本地翻译。")
 
         params = self.state.params.setdefault("translate", {})
         temperature = params.get("temperature", "0.2")
         model = params.get("model", "")
-        if yes_no(f"翻译将使用 temperature={temperature}{', model='+model if model else ''}，是否调整?", False):
+        if (not self.dry_run) and yes_no(f"翻译将使用 temperature={temperature}{', model='+model if model else ''}，是否调整?", False):
             temperature = prompt("请输入 temperature", temperature)
             model = prompt("请输入模型名称 (留空使用默认)", model, allow_empty=True)
         params["temperature"] = temperature
@@ -731,24 +827,68 @@ class EpisodePipeline:
         )
         if model:
             command += f" --model {shlex.quote(model)}"
-        print("远程执行翻译:")
-        print(command)
-        exit_code, _ = self.remote.run(command, timeout=1800)
-        if exit_code != 0:
-            raise PipelineError("远程翻译失败")
+        def do_local_translate() -> Tuple[Path, Path]:
+            local_translate = self.state.root / "translate"
+            local_translate.mkdir(parents=True, exist_ok=True)
+            # 清空旧产物
+            for entry in list(local_translate.iterdir()):
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            # 优先使用本地 handoff 的 transcript
+            local_transcript = handoff.get("best", {}).get("transcript_txt")
+            if not local_transcript or not Path(local_transcript).is_file():
+                # 回退为从远端下载目录构造的路径名（极端情况下）
+                local_transcript = str(self.state.root / "whisperx" / Path(remote_input).name)
+            cmd_local = [
+                sys.executable,
+                "tools/translate_openai_cli.py",
+                "--env",
+                "tools/openai_translator.env",
+                "--input",
+                local_transcript,
+                "--output",
+                str(local_translate / "translation.json"),
+                "--emit-json",
+                "--json-output",
+                str(local_translate / "translation.json"),
+                "--script-out",
+                str(local_translate / "script.txt"),
+                "--analysis-out",
+                str(local_translate / "analysis.md"),
+                "--ensure-speakers-from",
+                str(self.state.root / "samples"),
+            ]
+            print("改为本地执行翻译:")
+            print(" ".join(shlex.quote(p) for p in cmd_local))
+            res = subprocess.run(cmd_local, cwd=str(Path.cwd()), text=True)
+            if res.returncode != 0:
+                raise PipelineError("本地翻译失败")
+            return local_translate / "script.txt", local_translate / "analysis.md"
 
-        local_translate = self.state.root / "translate"
-        local_translate.mkdir(parents=True, exist_ok=True)
-        for entry in local_translate.iterdir():
-            if entry.is_dir():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink()
-        self.remote.download_dir(remote_out_dir, local_translate)
-        script_path = local_translate / "script.txt"
-        analysis_path = local_translate / "analysis.md"
-        if not script_path.is_file():
-            raise PipelineError("翻译脚本缺失")
+        try:
+            print("远程执行翻译:")
+            print(command)
+            exit_code, _ = self.remote.run(command, timeout=1800)
+            if exit_code != 0:
+                raise PipelineError("远程翻译失败")
+            local_translate = self.state.root / "translate"
+            local_translate.mkdir(parents=True, exist_ok=True)
+            for entry in list(local_translate.iterdir()):
+                if entry.is_dir():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+            self.remote.download_dir(remote_out_dir, local_translate)
+            script_path = local_translate / "script.txt"
+            analysis_path = local_translate / "analysis.md"
+            if not script_path.is_file():
+                raise PipelineError("翻译脚本缺失")
+        except Exception as exc:
+            print(f"[warn] 远程翻译失败 ({exc})，将尝试在本地执行。")
+            script_path, analysis_path = do_local_translate()
+
         info.mark("done", script=str(script_path))
         self.state.save()
         self._confirm_translation(script_path, analysis_path)
@@ -1004,7 +1144,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         state = select_episode()
 
-    remote_cfg = prompt_remote_config()
+    if args.dry_run:
+        remote_cfg = RemoteConfig(
+            host="localhost",
+            port=22,
+            user=getpass.getuser(),
+            password=None,
+            remote_repo=DEFAULT_REMOTE_REPO,
+            remote_workdir_base=DEFAULT_REMOTE_WORKDIR,
+            whisperx_project=DEFAULT_WHISPERX_PROJECT,
+        )
+    else:
+        remote_cfg = prompt_remote_config()
     pipeline = EpisodePipeline(state, remote_cfg, dry_run=bool(args.dry_run))
     try:
         pipeline.run(from_step=args.from_step)
