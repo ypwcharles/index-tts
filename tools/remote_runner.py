@@ -792,42 +792,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         group_by_speaker=group_by_speaker,
     )
 
-    remote_paths = RemotePaths(
-        workdir=remote_workdir,
-        repo=remote_repo,
-        story_path=f"{remote_workdir}/{story_name}-{timestamp}.toml",
-        text_path=f"{remote_workdir}/{story_name}-{timestamp}.txt",
-        output_dir=remote_workdir,
-        output_file=default_output,
-        subtitle_file=subtitle_name,
-        log_path=f"{remote_workdir}/{story_name}-{timestamp}.log",
-        timestamp=timestamp,
-    )
-
-    config_content = build_remote_config(template, remote_paths, voices, overrides)
-
-    local_output_dir = Path(args.local_output).expanduser()
-    local_output_dir.mkdir(parents=True, exist_ok=True)
-
-    tmp_fd, tmp_name = tempfile.mkstemp(prefix="story_remote_", suffix=".toml")
-    os.close(tmp_fd)
-    local_config_tmp = Path(tmp_name)
-    local_config_tmp.write_text(config_content, encoding="utf-8")
-    print(f"已生成临时配置: {local_config_tmp}")
-
-    temp_files = [local_config_tmp]
-    if text_is_temp:
-        temp_files.append(text_path)
-
-    assets = LocalAssets(
-        config_path=local_config_tmp,
-        text_path=text_path,
-        voices=voices,
-        output_dir=local_output_dir,
-        temp_files=temp_files,
-    )
-
-    # 根据脚本中的标签重建 voices，并尝试补齐缺失的标签样本
+    # 根据脚本中的标签重建 voices，并尝试补齐缺失的标签样本（必须在生成 story.toml 之前执行）
     try:
         import re as _re
         raw_text = assets.text_path.read_text(encoding="utf-8")
@@ -889,16 +854,44 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 for name, path in voices.items():
                     voice_section[name] = {"ref_audio": path.name, "ref_text": ""}
                 template["voices"] = voice_section
-                # 更新 assets 中的 voices 引用
-                assets = LocalAssets(
-                    config_path=assets.config_path,
-                    text_path=assets.text_path,
-                    voices=voices,
-                    output_dir=assets.output_dir,
-                    temp_files=assets.temp_files,
-                )
     except Exception as _exc:
         print(f"[warn] 无法按脚本重建 voices（忽略并继续）：{_exc}")
+
+    # 生成远端路径与配置（使用对齐后的 voices）
+    remote_paths = RemotePaths(
+        workdir=remote_workdir,
+        repo=remote_repo,
+        story_path=f"{remote_workdir}/{story_name}-{timestamp}.toml",
+        text_path=f"{remote_workdir}/{story_name}-{timestamp}.txt",
+        output_dir=remote_workdir,
+        output_file=default_output,
+        subtitle_file=subtitle_name,
+        log_path=f"{remote_workdir}/{story_name}-{timestamp}.log",
+        timestamp=timestamp,
+    )
+
+    config_content = build_remote_config(template, remote_paths, voices, overrides)
+
+    local_output_dir = Path(args.local_output).expanduser()
+    local_output_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_fd, tmp_name = tempfile.mkstemp(prefix="story_remote_", suffix=".toml")
+    os.close(tmp_fd)
+    local_config_tmp = Path(tmp_name)
+    local_config_tmp.write_text(config_content, encoding="utf-8")
+    print(f"已生成临时配置: {local_config_tmp}")
+
+    temp_files = [local_config_tmp]
+    if text_is_temp:
+        temp_files.append(text_path)
+
+    assets = LocalAssets(
+        config_path=local_config_tmp,
+        text_path=text_path,
+        voices=voices,
+        output_dir=local_output_dir,
+        temp_files=temp_files,
+    )
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
