@@ -387,6 +387,8 @@ class EpisodePipeline:
         print_header("运行 WhisperX 远程转录")
         output_dir = self.state.root / "whisperx"
         ssh_cmd = self.remote_cfg.ssh_command()
+        # 按项目名聚合远程目录: /root/autodl-fs/outputs/<episode>/whisperx
+        remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
         cmd = [
             sys.executable,
             "tools/whisperx_runner.py",
@@ -399,7 +401,7 @@ class EpisodePipeline:
             "--local-output",
             str(output_dir),
             "--remote-dir",
-            f"{self.remote_cfg.remote_workdir_base}/whisperx",
+            f"{remote_episode_base}/whisperx",
             "--remote-project",
             self.remote_cfg.whisperx_project or DEFAULT_WHISPERX_PROJECT,
         ]
@@ -454,7 +456,9 @@ class EpisodePipeline:
             raise PipelineError("缺少 WhisperX 运行信息，无法提取样本")
 
         remote_json = f"{run_remote}/{Path(diar_json).name}"
-        remote_samples_dir = f"{run_remote}/samples"
+        # 统一到项目根目录下: /root/autodl-fs/outputs/<episode>/samples
+        remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
+        remote_samples_dir = f"{remote_episode_base}/samples"
         local_samples = self.state.root / "samples"
         if local_samples.exists():
             for entry in local_samples.iterdir():
@@ -546,7 +550,9 @@ class EpisodePipeline:
             raise PipelineError("缺少翻译所需的远程文件信息")
 
         remote_input = f"{remote_run}/{Path(transcript).name}"
-        remote_out_dir = f"{remote_run}/translate"
+        # 统一到项目根目录下: /root/autodl-fs/outputs/<episode>/translate
+        remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
+        remote_out_dir = f"{remote_episode_base}/translate"
         code, _ = self.remote.run(
             f"rm -rf {shlex.quote(remote_out_dir)} && mkdir -p {shlex.quote(remote_out_dir)}"
         )
