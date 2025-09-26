@@ -345,6 +345,11 @@ class EpisodePipeline:
             print_header("选择起始步骤")
             start_index = choose("从哪一步开始重新执行?", step_names_cn, default_index=start_index)
 
+        # 无论当前状态如何，按选择的起点将该步及其后的状态重置为 pending，确保可重新执行
+        chosen_step = STEP_ORDER[start_index]
+        self.state.reset_after(chosen_step)
+        self.state.save()
+
         for step in STEP_ORDER[start_index:]:
             while True:
                 info = self.state.step(step)
