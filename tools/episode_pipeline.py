@@ -292,10 +292,11 @@ class RemoteSession:
 
 
 class EpisodePipeline:
-    def __init__(self, state: EpisodeState, remote_cfg: RemoteConfig) -> None:
+    def __init__(self, state: EpisodeState, remote_cfg: RemoteConfig, *, dry_run: bool = False) -> None:
         self.state = state
         self.remote_cfg = remote_cfg
         self.remote = RemoteSession(remote_cfg)
+        self.dry_run = dry_run
 
     def close(self) -> None:
         self.remote.close()
@@ -413,6 +414,44 @@ class EpisodePipeline:
         print_header("运行 WhisperX 远程转录")
         output_dir = self.state.root / "whisperx"
         ssh_cmd = self.remote_cfg.ssh_command()
+        # Dry-run: 生成最小 handoff.json 以便后续步骤联动
+        if self.dry_run:
+            remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
+            run_name = f"whisperx-DRYRUN-{audio_path.stem}"
+            remote_run_dir = f"{remote_episode_base}/whisperx/{run_name}"
+            local_run_dir = output_dir / run_name
+            local_run_dir.mkdir(parents=True, exist_ok=True)
+            handoff = {
+                "run_name": run_name,
+                "remote_run_dir": remote_run_dir,
+                "local_run_dir": str(local_run_dir),
+                "audio": str(audio_path),
+                "files": [],
+                "best": {
+                    "diarization_json": f"{remote_run_dir}/{audio_path.stem}.json",
+                    "transcript_txt": f"{remote_run_dir}/{audio_path.stem}.txt",
+                },
+                "speakers": {
+                    "raw_to_tag": {"SPEAKER_00": "speaker1", "SPEAKER_01": "speaker2"},
+                    "tags": ["speaker1", "speaker2"],
+                },
+            }
+            (local_run_dir / "handoff.json").write_text(
+                json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            info.mark(
+                "done",
+                run_name=run_name,
+                local_run=str(local_run_dir),
+                remote_run=remote_run_dir,
+                diar_json=handoff["best"]["diarization_json"],
+                transcript=handoff["best"]["transcript_txt"],
+            )
+            self.state.remote["whisperx_run_dir"] = remote_run_dir
+            self.state.remote["audio_remote"] = self._guess_remote_audio_path(handoff)
+            self.state.save()
+            print("[dry-run] WhisperX 完成 (模拟)。")
+            return
         # 按项目名聚合远程目录: /root/autodl-fs/outputs/<episode>/whisperx
         remote_episode_base = f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}"
         cmd = [
@@ -495,12 +534,52 @@ class EpisodePipeline:
 
         preset = self.state.params.get("samples", {}).get("preset", "podcast")
         per_speaker = int(self.state.params.get("samples", {}).get("per_speaker", "1"))
-        if yes_no(f"样本提取将使用 preset={preset}, 每人 {per_speaker} 段，是否调整?", False):
+        if not self.dry_run and yes_no(f"样本提取将使用 preset={preset}, 每人 {per_speaker} 段，是否调整?", False):
             preset = prompt("请输入 preset (podcast/strict/relaxed/fast)", preset)
             per_speaker = int(prompt("请输入每位说话人的样本数量", str(per_speaker)))
         self.state.params.setdefault("samples", {})["preset"] = preset
         self.state.params["samples"]["per_speaker"] = str(per_speaker)
         self.state.save()
+
+        # Dry-run: 生成本地样本与 manifest
+        if self.dry_run:
+            from shutil import which
+            local_samples.mkdir(parents=True, exist_ok=True)
+            spk1 = local_samples / "speaker1.mp3"
+            spk2 = local_samples / "speaker2.mp3"
+            if which("ffmpeg"):
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+                    "-t", "1", "-c:a", "libmp3lame", "-q:a", "7", str(spk1)
+                ], check=True)
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+                    "-t", "1", "-c:a", "libmp3lame", "-q:a", "7", str(spk2)
+                ], check=True)
+            else:
+                spk1.write_bytes(b"")
+                spk2.write_bytes(b"")
+            manifest = {
+                "audio": self.state.remote.get("audio_remote", ""),
+                "metadata": remote_json,
+                "output_dir": str(local_samples),
+                "clips": [],
+                "summary": {
+                    "selected": {"speaker1": [str(spk1)], "speaker2": [str(spk2)]},
+                    "alternatives": {},
+                    "speakers": ["speaker1", "speaker2"],
+                },
+            }
+            (local_samples / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            self.state.remote["samples_dir"] = remote_samples_dir
+            info.mark("done", manifest=str(local_samples / "manifest.json"))
+            self.state.save()
+            print("[dry-run] 样本生成完成 (模拟)。")
+            return
 
         def _extract_with_flags(extra: str = "") -> Path:
             cleanup_cmd = (
@@ -614,6 +693,23 @@ class EpisodePipeline:
         params["temperature"] = temperature
         params["model"] = model
         self.state.save()
+
+        # Dry-run: 生成本地脚本与分析文件
+        if self.dry_run:
+            local_translate = self.state.root / "translate"
+            local_translate.mkdir(parents=True, exist_ok=True)
+            (local_translate / "script.txt").write_text(
+                "[speaker1] 这是测试脚本。\n[speaker2] 你好，世界。\n",
+                encoding="utf-8",
+            )
+            (local_translate / "analysis.md").write_text(
+                "# 测试分析\n\n此为 dry-run 生成的占位分析。\n",
+                encoding="utf-8",
+            )
+            info.mark("done", script=str(local_translate / "script.txt"))
+            self.state.save()
+            print("[dry-run] 翻译完成 (模拟)。")
+            return
 
         prefix = (
             f"cd {shlex.quote(self.remote_cfg.remote_repo)} && "
@@ -760,6 +856,27 @@ class EpisodePipeline:
             "--ssh",
             self.remote_cfg.ssh_command(),
         ]
+        if self.dry_run:
+            print("[dry-run] 远程合成命令:")
+            print(" ".join(shlex.quote(part) for part in cmd))
+            synth_dir = self.state.root / "synth"
+            synth_dir.mkdir(parents=True, exist_ok=True)
+            # 生成一段 1s 的静音占位音频
+            from shutil import which
+            dummy = synth_dir / f"{self.state.episode_id}.wav"
+            if which("ffmpeg"):
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+                    "-t", "1", "-c:a", "pcm_s16le", str(dummy)
+                ], check=True)
+            else:
+                dummy.write_bytes(b"")
+            outputs = [p.name for p in synth_dir.glob("*") if p.is_file()]
+            info.mark("done", outputs=", ".join(outputs))
+            self.state.save()
+            print("[dry-run] TTS 合成完成 (模拟)。")
+            return
         if self.remote_cfg.password:
             cmd.extend(["--password", self.remote_cfg.password])
         print("执行远程合成:")
@@ -878,6 +995,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="播客本地化流水线 (交互式)")
     parser.add_argument("--episode", help="直接指定项目 ID", default=None)
     parser.add_argument("--from-step", choices=STEP_ORDER, help="从指定步骤开始执行 (transcribe/samples/translate/tts_prep/synthesize)")
+    parser.add_argument("--dry-run", action="store_true", help="仅本地演练，不进行远程执行，生成占位产物")
     args = parser.parse_args(argv)
 
     if args.episode:
@@ -887,7 +1005,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         state = select_episode()
 
     remote_cfg = prompt_remote_config()
-    pipeline = EpisodePipeline(state, remote_cfg)
+    pipeline = EpisodePipeline(state, remote_cfg, dry_run=bool(args.dry_run))
     try:
         pipeline.run(from_step=args.from_step)
     finally:
