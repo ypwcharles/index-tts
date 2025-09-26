@@ -161,7 +161,8 @@ def build_default_story_config(
         "gen_text": "",
         "gen_file": text_path.name,
         "remove_silence": True,
-        "output_dir": f"/root/autodl-fs/{story_name}",
+        # 统一到 /root/autodl-fs/outputs 下
+        "output_dir": f"/root/autodl-fs/outputs/{story_name}",
         "output_file": f"{story_name}.mp3",
         "output_subtitle_file": f"subtitle-{story_name}.json",
         "runtime": {
@@ -605,11 +606,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if isinstance(template_dir, str) and template_dir.strip():
             if template_dir.startswith("/"):
                 return template_dir.rstrip("/")
-            base = "/root/autodl-fs"
+            base = "/root/autodl-fs/outputs"
             return f"{base}/{template_dir.strip('/')}"
         if source_dir:
-            return f"/root/autodl-fs/{source_dir.name}"
-        return "/root/autodl-fs"
+            return f"/root/autodl-fs/outputs/{source_dir.name}"
+        return "/root/autodl-fs/outputs"
 
     remote_workdir = derive_remote_workdir()
     print(f"使用远程工作目录: {remote_workdir}")

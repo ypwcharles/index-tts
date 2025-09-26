@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--remote-dir",
         dest="remote_dir",
-        default="/root/autodl-fs/whisperX",
+        default="/root/autodl-fs/outputs/whisperx",
         help="Remote base directory to store uploads and outputs.",
     )
     parser.add_argument(

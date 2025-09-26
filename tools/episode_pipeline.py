@@ -27,7 +27,8 @@ import stat
 
 PROJECT_BASE = Path("/Users/peiwenyang/Development/podcasts-test")
 DEFAULT_REMOTE_REPO = "/root/index-tts"
-DEFAULT_REMOTE_WORKDIR = "/root/autodl-fs/index-tts"
+# 统一的远端工作根目录，集中放置输出
+DEFAULT_REMOTE_WORKDIR = "/root/autodl-fs/outputs"
 DEFAULT_WHISPERX_PROJECT = "/root/autodl-fs/whisperX"
 STEP_ORDER = ["transcribe", "samples", "translate", "tts_prep", "synthesize"]
 
@@ -721,7 +722,7 @@ class EpisodePipeline:
 def prompt_remote_config() -> RemoteConfig:
     print_header("配置远程连接")
     while True:
-        # 支持直接粘贴完整 SSH 指令
+        # 仅需粘贴 SSH 指令（或逐项输入），其它目录固定为默认值
         ssh_raw = prompt(
             "SSH 登录指令（如: ssh -p 34672 root@example.com，可留空）",
             default="",
@@ -745,8 +746,7 @@ def prompt_remote_config() -> RemoteConfig:
                             raise ValueError("-p 后缺少端口号。")
                         port = int(tokens[idx])
                     elif t.startswith("-"):
-                        # 其它参数忽略（容错）
-                        pass
+                        pass  # 其它参数忽略（容错）
                     else:
                         spec = t
                         if "@" in spec:
@@ -775,17 +775,21 @@ def prompt_remote_config() -> RemoteConfig:
             user = prompt("用户名", getpass.getuser())
 
         password = getpass.getpass("密码 (使用密钥登录可留空): ") or None
-        repo = prompt("远程仓库路径", DEFAULT_REMOTE_REPO)
-        workdir = prompt("远程工作根目录", DEFAULT_REMOTE_WORKDIR)
-        wx_proj = prompt("WhisperX 项目目录", DEFAULT_WHISPERX_PROJECT)
         cfg = RemoteConfig(
             host=host,
             port=port,
             user=user,
             password=password,
-            remote_repo=repo,
-            remote_workdir_base=workdir,
-            whisperx_project=wx_proj,
+            remote_repo=DEFAULT_REMOTE_REPO,
+            remote_workdir_base=DEFAULT_REMOTE_WORKDIR,
+            whisperx_project=DEFAULT_WHISPERX_PROJECT,
+        )
+        # 提示一次总览，默认确认
+        print(
+            f"\n远程主机: {host}:{port} (用户 {user})\n"
+            f"远程仓库路径: {DEFAULT_REMOTE_REPO}\n"
+            f"远程工作根目录: {DEFAULT_REMOTE_WORKDIR}\n"
+            f"WhisperX 项目目录: {DEFAULT_WHISPERX_PROJECT}\n"
         )
         if yes_no("以上配置是否正确?", True):
             return cfg
