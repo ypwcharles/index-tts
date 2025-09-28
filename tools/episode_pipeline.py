@@ -678,8 +678,7 @@ class EpisodePipeline:
             cmd_extract_codex = cmd_extract + [
                 "--assistant-engine",
                 "codex",
-                "--assistant-codex-flags",
-                "--full-auto",
+                "--assistant-codex-flags=--full-auto",
                 "--assistant-timeout",
                 "300",
                 "--assistant-log",
