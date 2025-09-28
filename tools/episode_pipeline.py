@@ -994,6 +994,7 @@ class EpisodePipeline:
             "3",
             "--ssh",
             self.remote_cfg.ssh_command(),
+            "--disable-fixed-voices",
         ]
         if self.dry_run:
             print("[dry-run] 远程合成命令:")

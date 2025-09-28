@@ -399,6 +399,8 @@ def build_remote_config(
     remote: RemotePaths,
     voices: Dict[str, Path],
     overrides: RuntimeOverrides,
+    *,
+    use_fixed_voices: bool = True,
 ) -> str:
     config_data: Dict[str, object] = {}
     for key, value in template.items():
@@ -445,7 +447,7 @@ def build_remote_config(
         voice_data = dict(params)
         # Include voice key in remote file to avoid collisions; allow fixed remote mapping
         lower = name.lower()
-        fixed_remote = FIXED_REMOTE_VOICES.get(lower)
+        fixed_remote = FIXED_REMOTE_VOICES.get(lower) if use_fixed_voices else None
         if fixed_remote:
             remote_audio = fixed_remote
         else:
@@ -618,6 +620,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.set_defaults(group_by_speaker=None)
     parser.add_argument("--ssh", help="完整的 SSH 命令或 user@host 格式；可包含 -p 端口")
     parser.add_argument("--password", help="SSH 密码；如留空则按默认方式登录")
+    parser.add_argument(
+        "--disable-fixed-voices",
+        dest="disable_fixed_voices",
+        action="store_true",
+        help="禁用固定远端语音映射（例如 speakery -> /root/autodl-fs/speakerY.mp3）",
+    )
     args = parser.parse_args(argv)
 
     source_dir: Optional[Path] = None
@@ -882,7 +890,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         timestamp=timestamp,
     )
 
-    config_content = build_remote_config(template, remote_paths, voices, overrides)
+    config_content = build_remote_config(
+        template,
+        remote_paths,
+        voices,
+        overrides,
+        use_fixed_voices=(not args.disable_fixed_voices),
+    )
 
     local_output_dir = Path(args.local_output).expanduser()
     local_output_dir.mkdir(parents=True, exist_ok=True)
@@ -924,7 +938,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
         for voice_name, local_voice in voices.items():
             fixed = FIXED_REMOTE_VOICES.get(voice_name.lower())
-            if fixed:
+            if fixed and (not args.disable_fixed_voices):
                 print(f"跳过上传固定远端语音: {voice_name} -> {fixed}")
                 continue
             remote_voice_path = f"{remote_paths.workdir}/{remote_paths.timestamp}-{voice_name}-{local_voice.name}"
