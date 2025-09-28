@@ -939,8 +939,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for voice_name, local_voice in voices.items():
             fixed = FIXED_REMOTE_VOICES.get(voice_name.lower())
             if fixed and (not args.disable_fixed_voices):
-                print(f"跳过上传固定远端语音: {voice_name} -> {fixed}")
-                continue
+                # If fixed path exists on remote, skip upload; otherwise, upload to fixed path to satisfy config
+                try:
+                    sftp.stat(fixed)
+                    print(f"跳过上传固定远端语音: {voice_name} -> {fixed} (已存在)")
+                    continue
+                except FileNotFoundError:
+                    # Ensure parent directory exists, then upload to the fixed target path
+                    parent = os.path.dirname(fixed) or "/"
+                    try:
+                        ensure_remote_dirs(client, [parent])
+                    except Exception:
+                        pass
+                    print(f"远端缺少固定语音，上传以填充: {voice_name} -> {fixed}")
+                    upload_map[fixed] = local_voice
+                    continue
+                except Exception:
+                    # On unexpected error, fall back to uploading into workdir path
+                    pass
             remote_voice_path = f"{remote_paths.workdir}/{remote_paths.timestamp}-{voice_name}-{local_voice.name}"
             upload_map[remote_voice_path] = local_voice
         upload_files(sftp, upload_map)
