@@ -657,6 +657,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--group-by-speaker", dest="group_by_speaker", action="store_true", help="按说话人聚合任务")
     parser.add_argument("--no-group-by-speaker", dest="group_by_speaker", action="store_false", help="禁用按说话人聚合")
     parser.set_defaults(group_by_speaker=None)
+    parser.add_argument("--schedule", choices=["static", "dynamic"], default="dynamic", help="任务调度模式 (默认 dynamic)")
     parser.add_argument("--ssh", help="完整的 SSH 命令或 user@host 格式；可包含 -p 端口")
     parser.add_argument("--password", help="SSH 密码；如留空则按默认方式登录")
     parser.add_argument(
@@ -1021,9 +1022,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         env_prefix = "export PATH=\"/root/miniconda3/bin:$PATH\""
         if template.get("hf_endpoint"):
             env_prefix += f" && export HF_ENDPOINT=\"{template['hf_endpoint']}\""
+        schedule_arg = f" --schedule {args.schedule}" if args.schedule else ""
         pipeline = (
             f"set -o pipefail; cd {shlex.quote(remote_paths.repo)} && {env_prefix} && "
-            f"PYTHONPATH='$PWD' uv run python tools/batch_infer.py --config {shlex.quote(remote_paths.story_path)} "
+            f"PYTHONPATH='$PWD' uv run python tools/batch_infer.py --config {shlex.quote(remote_paths.story_path)}{schedule_arg} "
             f"2>&1 | tee {shlex.quote(remote_paths.log_path)}"
         )
         command = f"bash -lc {shlex.quote(pipeline)}"

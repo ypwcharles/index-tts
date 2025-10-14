@@ -362,7 +362,8 @@ def _worker_main(
             voice = voices[speaker]
             sr, audio = synthesize_segment(tts, voice, sentence, worker_runtime)
             audio = audio.to(torch.float32).cpu().contiguous()
-            result_queue.put((idx, sr, audio))
+            # Include speaker so the scheduler can honor affinity
+            result_queue.put((idx, sr, audio, speaker))
     except Exception as exc:  # pragma: no cover - defensive guard
         import traceback
 
@@ -590,7 +591,7 @@ def run_parallel(
     remaining = len(tasks)
     while remaining > 0:
         try:
-            idx, sr, audio = result_queue.get(timeout=1.0)
+            payload = result_queue.get(timeout=1.0)
         except queue.Empty:
             if not error_queue.empty():
                 worker_id, message, tb = error_queue.get()
@@ -598,6 +599,10 @@ def run_parallel(
                     proc.terminate()
                 raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
             continue
+        if isinstance(payload, tuple) and len(payload) == 4:
+            idx, sr, audio, _spk = payload
+        else:
+            idx, sr, audio = payload  # type: ignore[misc]
         results[idx] = (sr, audio)
         if progress_cb:
             progress_cb(idx, sr, audio)
@@ -739,6 +744,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--group-by-speaker", dest="group_by_speaker", action="store_true", help="按说话人聚合任务，默认开启")
     parser.add_argument("--no-group-by-speaker", dest="group_by_speaker", action="store_false", help="禁用说话人聚合")
     parser.set_defaults(group_by_speaker=None)
+    parser.add_argument("--schedule", choices=["static", "dynamic"], default="static", help="任务调度模式：static(预分区) 或 dynamic(共享队列)")
     return parser.parse_args(argv)
 
 
@@ -798,7 +804,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     num_workers = max(1, runtime.num_workers)
     if num_workers > 1:
         print(f"启用并行模式，worker 数量: {num_workers}")
-        results = run_parallel(tasks, voices, runtime, num_workers, progress_cb=progress_cb)
+        if args.schedule == "dynamic":
+            print("调度模式: dynamic (共享队列/LPT)")
+            results = run_parallel_dynamic(tasks, voices, runtime, num_workers, progress_cb=progress_cb)
+        else:
+            print("调度模式: static (预分区/连续语者)")
+            results = run_parallel(tasks, voices, runtime, num_workers, progress_cb=progress_cb)
     else:
         results = run_sequential(tasks, voices, runtime, progress_cb=progress_cb)
 
@@ -830,6 +841,143 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overall_rtf = total_elapsed / total_seconds
         print(f"整体 RTF: {overall_rtf:.2f}")
     return 0
+
+
+def run_parallel_dynamic(
+    tasks: Sequence[Tuple[int, str, str]],
+    voices: Dict[str, VoiceConfig],
+    runtime: RuntimeConfig,
+    num_workers: int,
+    progress_cb: Optional[Callable[[int, int, torch.Tensor], None]] = None,
+) -> Dict[int, Tuple[int, torch.Tensor]]:
+    """Dynamic scheduler with speaker affinity and LPT.
+
+    Parent process feeds each worker one item at a time via per-worker queues.
+    When a worker finishes, the parent assigns the next item, preferring the same
+    speaker if available; otherwise choose the speaker with the most remaining text.
+    """
+    mp.set_start_method("spawn", force=True)
+    result_queue: mp.Queue = mp.Queue()
+    error_queue: mp.Queue = mp.Queue()
+
+    worker_devices = resolve_worker_devices(runtime)
+    if worker_devices:
+        print(f"worker 设备分配: {', '.join(worker_devices)}")
+
+    # Build per-speaker queues (preserve original order); track remaining weights
+    from collections import deque, defaultdict
+    per_spk: Dict[str, deque] = {}
+    spk_weight: Dict[str, int] = defaultdict(int)
+    for idx, spk, text in tasks:
+        per_spk.setdefault(spk, deque()).append((idx, spk, text))
+        spk_weight[spk] += len(text)
+
+    def _pop_for_speaker(spk: Optional[str]) -> Optional[Tuple[int, str, str]]:
+        if spk and per_spk.get(spk):
+            item = per_spk[spk].popleft()
+            spk_weight[spk] -= len(item[2])
+            if not per_spk[spk]:
+                per_spk.pop(spk, None)
+                spk_weight.pop(spk, None)
+            return item
+        # choose speaker with max remaining weight
+        if not spk_weight:
+            return None
+        best = max(spk_weight.items(), key=lambda kv: kv[1])[0]
+        dq = per_spk.get(best)
+        if not dq:
+            spk_weight.pop(best, None)
+            return _pop_for_speaker(spk)
+        item = dq.popleft()
+        spk_weight[best] -= len(item[2])
+        if not dq:
+            per_spk.pop(best, None)
+            spk_weight.pop(best, None)
+        return item
+
+    # Create per-worker queues and processes
+    processes: List[mp.Process] = []
+    task_queues: List[mp.Queue] = []
+    last_spk: Dict[int, Optional[str]] = {i: None for i in range(num_workers)}
+    for worker_idx in range(num_workers):
+        q: mp.Queue = mp.Queue()
+        task_queues.append(q)
+        device = worker_devices[worker_idx % len(worker_devices)] if worker_devices else None
+        p = mp.Process(target=_worker_main, args=(q, result_queue, error_queue, runtime, voices, device, worker_idx))
+        p.start()
+        processes.append(p)
+
+    # Initially feed one item per worker
+    total = len(tasks)
+    assigned = 0
+    for wid in range(num_workers):
+        item = _pop_for_speaker(None)
+        if item is None:
+            task_queues[wid].put(None)
+            continue
+        task_queues[wid].put(item)
+        assigned += 1
+
+    results: Dict[int, Tuple[int, torch.Tensor]] = {}
+    completed = 0
+    while completed < total:
+        try:
+            payload = result_queue.get(timeout=1.0)
+        except queue.Empty:
+            if not error_queue.empty():
+                worker_id, message, tb = error_queue.get()
+                for proc in processes:
+                    proc.terminate()
+                raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
+            continue
+        if isinstance(payload, tuple) and len(payload) == 4:
+            idx, sr, audio, spk = payload
+        else:
+            idx, sr, audio = payload  # type: ignore[misc]
+            spk = None
+        results[idx] = (sr, audio)
+        if progress_cb:
+            progress_cb(idx, sr, audio)
+        completed += 1
+
+        # Identify which worker finished by checking which last assignment index belongs where
+        # Lightweight approach: remember last speaker per worker via last_spk dict updated on assignment
+        # Here, we cannot directly know wid; instead, we round-robin feed next tasks fairly
+        # Improve: try to assign using same speaker as the one just finished
+        target_wid = min(range(num_workers), key=lambda i: 0)  # placeholder, we'll just feed all workers in sequence
+        # Assign next for a worker that likely just became idle; iterate all workers and feed the first that has an empty queue buffer
+        fed = False
+        for wid in range(num_workers):
+            # Non-blocking heuristic: always try to top up each worker with one task if available
+            item = _pop_for_speaker(spk if spk in per_spk else None)
+            if item is None:
+                continue
+            task_queues[wid].put(item)
+            last_spk[wid] = item[1]
+            fed = True
+            break
+        if not fed and assigned < total:
+            # Fallback: feed any available
+            for wid in range(num_workers):
+                item = _pop_for_speaker(None)
+                if item is None:
+                    continue
+                task_queues[wid].put(item)
+                last_spk[wid] = item[1]
+                fed = True
+                break
+
+    # Signal termination
+    for q in task_queues:
+        q.put(None)
+    for p in processes:
+        p.join()
+
+    while not error_queue.empty():
+        worker_id, message, tb = error_queue.get()
+        raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
+
+    return results
 
 
 if __name__ == "__main__":

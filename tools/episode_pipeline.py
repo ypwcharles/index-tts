@@ -1252,6 +1252,8 @@ class EpisodePipeline:
             "3",
             "--ssh",
             self.remote_cfg.ssh_command(),
+            "--schedule",
+            "dynamic",
         ]
         if self.dry_run:
             print("[dry-run] 远程合成命令:")
