@@ -9,6 +9,7 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+import math
 
 import torch
 import torchaudio
@@ -417,11 +418,30 @@ def build_worker_partitions(
         speaker_tasks.items(), key=lambda kv: speaker_weight(kv[1]), reverse=True
     )
 
+    # 目标负载：用于将“超重”的说话人拆分成多个块，避免单 worker 长时间独占
+    total_weight = sum(speaker_weight(v) for _, v in ordered_speakers) or 1
+    target_per_worker = max(1, total_weight / float(max(1, num_workers)))
+
+    def _split_chunks(items: List[Tuple[int, str, str]], n_chunks: int) -> List[List[Tuple[int, str, str]]]:
+        n = max(1, min(n_chunks, len(items)))
+        # 连续切分，尽量保持时间顺序相邻的片段在同一块
+        size = int(math.ceil(len(items) / float(n)))
+        return [items[i : i + size] for i in range(0, len(items), size)]
+
     loads = [0] * num_workers
     for speaker, items in ordered_speakers:
-        target_worker = min(range(num_workers), key=lambda w: loads[w])
-        partitions[target_worker].extend(items)
-        loads[target_worker] += speaker_weight(items)
+        w = speaker_weight(items)
+        # 根据重量估算需要拆成几块；最多不超过 worker 数，避免过度切分
+        est_chunks = int(math.ceil(w / target_per_worker)) if target_per_worker > 0 else 1
+        est_chunks = max(1, min(est_chunks, num_workers))
+        # 进一步限制每个说话人切分上限，避免频繁切换（经验上 4 足够）
+        est_chunks = min(est_chunks, 4)
+        chunks = _split_chunks(items, est_chunks)
+        for chunk in chunks:
+            cw = speaker_weight(chunk)
+            target_worker = min(range(num_workers), key=lambda wid: loads[wid])
+            partitions[target_worker].extend(chunk)
+            loads[target_worker] += cw
 
     for bucket in partitions:
         bucket.sort(key=lambda item: item[0])

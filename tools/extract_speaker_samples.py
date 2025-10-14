@@ -699,13 +699,11 @@ def pick_top(
         eligible: List[Candidate] = []
         for c in cand_list:
             feats = getattr(c, "audio_features", {})
-            speech_ratio = float(feats.get("speech_ratio", 1.0))
+            speech_ratio = float(feats.get("speech_ratio", 0.0))
             bgm = float(feats.get("bgm_score", 0.0))
             if not (min_duration <= c.duration <= max_duration):
                 continue
             if c.status in {"noisy", "tail"}:
-                continue
-            if speech_ratio < min_speech_ratio:
                 continue
             if bgm > bgm_threshold:
                 continue
@@ -718,11 +716,9 @@ def pick_top(
         fallback_pool: List[Candidate] = []
         for c in cand_list:
             feats = getattr(c, "audio_features", {})
-            speech_ratio = float(feats.get("speech_ratio", 1.0))
+            speech_ratio = float(feats.get("speech_ratio", 0.0))
             bgm = float(feats.get("bgm_score", 0.0))
             if c.status in {"noisy", "tail"}:
-                continue
-            if speech_ratio < min_speech_ratio:
                 continue
             if bgm > bgm_threshold:
                 continue
@@ -730,9 +726,23 @@ def pick_top(
                 if any(_overlap_seconds((c.start, c.end), (s, e)) >= avoid_min_overlap for s, e in avoid_list):
                     continue
             fallback_pool.append(c)
-        # 始终按分数降序排序后再选择，避免出现“越往后越好”的错觉
-        eligible_sorted = sorted(eligible, key=lambda c: c.score, reverse=True)
-        fallback_sorted = sorted(fallback_pool, key=lambda c: c.score, reverse=True)
+        # 改为按语音占比从大到小排序（无阈值）；分数作为次级排序以稳定结果
+        eligible_sorted = sorted(
+            eligible,
+            key=lambda c: (
+                float(getattr(c, "audio_features", {}).get("speech_ratio", 0.0)),
+                c.score,
+            ),
+            reverse=True,
+        )
+        fallback_sorted = sorted(
+            fallback_pool,
+            key=lambda c: (
+                float(getattr(c, "audio_features", {}).get("speech_ratio", 0.0)),
+                c.score,
+            ),
+            reverse=True,
+        )
         pool = eligible_sorted if eligible_sorted else (fallback_sorted if allow_out_of_range else [])
         # 选择策略：支持 Top-K 内随机（在已排序的 pool 上）
         if sample_top_k and len(pool) > 0:

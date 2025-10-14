@@ -37,6 +37,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
+import threading
+import time
 from typing import Dict, Optional
 from urllib import request, error
 
@@ -196,7 +198,25 @@ def main() -> None:
         payload["max_tokens"] = int(args.max_tokens)
 
     print(f"调用: {endpoint} (model={cfg['model']})", file=sys.stderr)
-    data = post_chat_completions(endpoint, cfg["api_key"], payload, timeout=args.timeout)
+    # Heartbeat spinner while waiting for long generation
+    stop_event = threading.Event()
+    start_ts = time.time()
+
+    def _heartbeat() -> None:
+        i = 0
+        marks = "-\\|/"
+        while not stop_event.wait(2.0):
+            i = (i + 1) % len(marks)
+            elapsed = int(time.time() - start_ts)
+            # Print a concise progress note to stderr
+            print(f"[wait] 模型生成中 {marks[i]} {elapsed}s", file=sys.stderr)
+
+    t = threading.Thread(target=_heartbeat, daemon=True)
+    t.start()
+    try:
+        data = post_chat_completions(endpoint, cfg["api_key"], payload, timeout=args.timeout)
+    finally:
+        stop_event.set()
 
     if not isinstance(data, dict) or "choices" not in data:
         out_path = args.output if isinstance(args.output, Path) else Path(args.output)

@@ -225,6 +225,49 @@ class RemoteConfig:
         return f"{self.user}@{self.host}"
 
 
+def _mask_password_in_cmd(argv: List[str]) -> List[str]:
+    """Return a copy of argv with password value masked after --password.
+
+    Only affects printing; the original argv should still be used for execution.
+    """
+    out: List[str] = []
+    it = iter(range(len(argv)))
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        out.append(arg)
+        if arg == "--password" and i + 1 < len(argv):
+            out.append("***")
+            i += 2
+            continue
+        i += 1
+    return out
+
+
+def _test_ssh_connection(cfg: RemoteConfig, *, timeout: int = 8) -> Tuple[bool, str]:
+    """Best-effort SSH auth check to catch wrong password early.
+
+    Returns (ok, message). Never raises.
+    """
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=cfg.host,
+            port=cfg.port,
+            username=cfg.user,
+            password=cfg.password,
+            look_for_keys=not bool(cfg.password),
+            timeout=timeout,
+        )
+        client.close()
+        return True, "OK"
+    except paramiko.ssh_exception.AuthenticationException:
+        return False, "认证失败（用户名/密码不正确，或服务器禁用密码登录）"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"连接失败: {exc}"
+
+
 class RemoteSession:
     def __init__(self, cfg: RemoteConfig) -> None:
         self.cfg = cfg
@@ -361,18 +404,14 @@ class EpisodePipeline:
                 if info.status == "done":
                     break
                 if info.status == "failed":
-                    if not self.dry_run:
-                        if not yes_no(f"步骤 {step} 上次失败，是否重试?", True):
-                            break
+                    # 自动重试一次，避免无意义的交互
                     info.status = "pending"
                     info.meta.clear()
                     info.updated_at = None
                     self.state.save()
                 elif info.status == "pending":
-                    if not self.dry_run:
-                        if not yes_no(f"是否执行步骤 {step}?", True):
-                            print(f"跳过步骤 {step}，保持待执行状态。")
-                            break
+                    # 直接执行，无需逐步确认
+                    pass
 
                 try:
                     if step == "transcribe":
@@ -479,10 +518,37 @@ class EpisodePipeline:
         if self.remote_cfg.password:
             cmd.extend(["--password", self.remote_cfg.password])
         print("执行命令:")
-        print(" ".join(shlex.quote(part) for part in cmd))
+        print(" ".join(shlex.quote(part) for part in _mask_password_in_cmd(cmd)))
         result = subprocess.run(cmd, cwd=str(Path.cwd()), text=True)
         if result.returncode != 0:
-            raise PipelineError("WhisperX 运行失败")
+            print("[warn] WhisperX 运行失败。")
+            # 提供一次交互式重试
+            if not self.dry_run and yes_no("是否重新配置 SSH 并重试 WhisperX?", True):
+                self.remote_cfg = prompt_remote_config()
+                ssh_cmd = self.remote_cfg.ssh_command()
+                cmd = [
+                    sys.executable,
+                    "tools/whisperx_runner.py",
+                    str(audio_path),
+                    "--env-file",
+                    str(Path("tools/whisperx.env")),
+                    "--ssh",
+                    ssh_cmd,
+                    "--keep-remote",
+                    "--local-output",
+                    str(output_dir),
+                    "--remote-dir",
+                    f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}/whisperx",
+                    "--remote-project",
+                    self.remote_cfg.whisperx_project or DEFAULT_WHISPERX_PROJECT,
+                ]
+                if self.remote_cfg.password:
+                    cmd.extend(["--password", self.remote_cfg.password])
+                print("执行命令(重试):")
+                print(" ".join(shlex.quote(part) for part in cmd))
+                result = subprocess.run(cmd, cwd=str(Path.cwd()), text=True)
+            if result.returncode != 0:
+                raise PipelineError("WhisperX 运行失败")
 
         handoff = self._load_latest_handoff()
         info.mark(
@@ -535,9 +601,7 @@ class EpisodePipeline:
 
         preset = self.state.params.get("samples", {}).get("preset", "podcast")
         per_speaker = int(self.state.params.get("samples", {}).get("per_speaker", "1"))
-        if not self.dry_run and yes_no(f"样本提取将使用 preset={preset}, 每人 {per_speaker} 段，是否调整?", False):
-            preset = prompt("请输入 preset (podcast/strict/relaxed/fast)", preset)
-            per_speaker = int(prompt("请输入每位说话人的样本数量", str(per_speaker)))
+        # 不再交互调整参数，直接沿用默认/已保存设置
         self.state.params.setdefault("samples", {})["preset"] = preset
         self.state.params["samples"]["per_speaker"] = str(per_speaker)
         self.state.save()
@@ -764,8 +828,57 @@ class EpisodePipeline:
         transcript = handoff.get("best", {}).get("transcript_txt")
         remote_run = self.state.remote.get("whisperx_run_dir")
         remote_samples_dir = self.state.remote.get("samples_dir")
-        if not transcript or not remote_run or not remote_samples_dir:
-            raise PipelineError("缺少翻译所需的远程文件信息")
+        # 当缺少远程信息时，直接回退到本地翻译以提高可用性
+        if not transcript:
+            raise PipelineError("缺少本地转录文本 (transcript_txt)")
+        if not remote_run or not remote_samples_dir:
+            print("[warn] 缺少翻译所需的远程文件信息，改为在本地执行翻译…")
+            # 本地翻译路径不依赖远程目录
+            def do_local_translate() -> Tuple[Path, Path]:
+                local_translate = self.state.root / "translate"
+                local_translate.mkdir(parents=True, exist_ok=True)
+                # 清空旧产物
+                for entry in list(local_translate.iterdir()):
+                    if entry.is_dir():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink()
+                # 直接使用 handoff 中的本地 transcript
+                local_transcript = transcript
+                if not Path(local_transcript).is_file():
+                    # 极端情况回退为基于 whisperx 目录推断
+                    local_transcript = str(self.state.root / "whisperx" / Path(transcript).name)
+                cmd_local = [
+                    sys.executable,
+                    "tools/translate_openai_cli.py",
+                    "--env",
+                    "tools/openai_translator.env",
+                    "--input",
+                    local_transcript,
+                    "--output",
+                    str(local_translate / "translation.json"),
+                    "--emit-json",
+                    "--json-output",
+                    str(local_translate / "translation.json"),
+                    "--script-out",
+                    str(local_translate / "script.txt"),
+                    "--analysis-out",
+                    str(local_translate / "analysis.md"),
+                    "--ensure-speakers-from",
+                    str(self.state.root / "samples"),
+                ]
+                print("改为本地执行翻译:")
+                print(" ".join(shlex.quote(p) for p in cmd_local))
+                res = subprocess.run(cmd_local, cwd=str(Path.cwd()), text=True)
+                if res.returncode != 0:
+                    raise PipelineError("本地翻译失败")
+                return local_translate / "script.txt", local_translate / "analysis.md"
+
+            script_path, analysis_path = do_local_translate()
+            info.mark("done", script=str(script_path))
+            self.state.save()
+            self._confirm_translation(script_path, analysis_path)
+            return
 
         remote_input = f"{remote_run}/{Path(transcript).name}"
         # 统一到项目根目录下: /root/autodl-fs/outputs/<episode>/translate
@@ -782,9 +895,7 @@ class EpisodePipeline:
         params = self.state.params.setdefault("translate", {})
         temperature = params.get("temperature", "0.2")
         model = params.get("model", "")
-        if (not self.dry_run) and yes_no(f"翻译将使用 temperature={temperature}{', model='+model if model else ''}，是否调整?", False):
-            temperature = prompt("请输入 temperature", temperature)
-            model = prompt("请输入模型名称 (留空使用默认)", model, allow_empty=True)
+        # 不再提示调整翻译参数，使用已保存/默认值
         params["temperature"] = temperature
         params["model"] = model
         self.state.save()
@@ -1019,8 +1130,38 @@ class EpisodePipeline:
         if self.remote_cfg.password:
             cmd.extend(["--password", self.remote_cfg.password])
         print("执行远程合成:")
-        print(" ".join(shlex.quote(part) for part in cmd))
+        print(" ".join(shlex.quote(part) for part in _mask_password_in_cmd(cmd)))
         result = subprocess.run(cmd, cwd=str(Path.cwd()), text=True)
+        if result.returncode != 0 and not self.dry_run:
+            # 提供一次交互式重试机会（常见于认证失败或网络问题）
+            print("[warn] 远程合成失败。")
+            if yes_no("是否重新配置 SSH 并重试?", True):
+                # 允许用户重新输入远端配置并立即重试一次
+                self.remote_cfg = prompt_remote_config()
+                # 重建命令并重试
+                cmd = [
+                    sys.executable,
+                    "tools/remote_runner.py",
+                    "--source-dir",
+                    str(run_dir),
+                    "--story-name",
+                    self.state.episode_id,
+                    "--remote-workdir",
+                    f"{self.remote_cfg.remote_workdir_base}/{self.state.episode_id}",
+                    "--remote-repo",
+                    self.remote_cfg.remote_repo,
+                    "--local-output",
+                    str(self.state.root / "synth"),
+                    "--num-workers",
+                    "3",
+                    "--ssh",
+                    self.remote_cfg.ssh_command(),
+                ]
+                if self.remote_cfg.password:
+                    cmd.extend(["--password", self.remote_cfg.password])
+                print("执行远程合成(重试):")
+                print(" ".join(shlex.quote(part) for part in _mask_password_in_cmd(cmd)))
+                result = subprocess.run(cmd, cwd=str(Path.cwd()), text=True)
         if result.returncode != 0:
             raise PipelineError("TTS 合成失败")
 
@@ -1104,7 +1245,16 @@ def prompt_remote_config() -> RemoteConfig:
             f"WhisperX 项目目录: {DEFAULT_WHISPERX_PROJECT}\n"
         )
         if yes_no("以上配置是否正确?", True):
-            return cfg
+            ok, msg = _test_ssh_connection(cfg)
+            if ok:
+                return cfg
+            print(f"[warn] SSH 测试未通过：{msg}")
+            # 为常见的“认证失败”提供指引
+            if yes_no("是否重新输入凭据并重试?", True):
+                continue
+            # 允许继续（例如用户打算使用密钥登录但暂时不可达）
+            if yes_no("是否忽略警告并继续?", False):
+                return cfg
 
 
 def select_episode() -> EpisodeState:

@@ -560,33 +560,72 @@ def execute_command(ssh: paramiko.SSHClient, command: str) -> Tuple[int, List[st
     return exit_status, output_lines
 
 
+def _query_remote_gpus_quick(login: Dict[str, str], password: Optional[str]) -> List[Tuple[int, int]]:
+    """Quick probe remote GPUs via nvidia-smi; returns list of (index, mem_total_MB)."""
+    try:
+        client = SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=login["host"],
+            port=int(login["port"]),
+            username=login["user"],
+            password=password,
+            look_for_keys=not bool(password),
+            timeout=6,
+        )
+        try:
+            cmd = "nvidia-smi --query-gpu=index,memory.total --format=csv,noheader,nounits"
+            stdin, stdout, stderr = client.exec_command(cmd, get_pty=True)
+            out = stdout.read().decode("utf-8", errors="ignore").strip()
+            if not out:
+                return []
+            result: List[Tuple[int, int]] = []
+            for line in out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2 and parts[0].isdigit():
+                    try:
+                        result.append((int(parts[0]), int(parts[1])))
+                    except Exception:
+                        continue
+            return result
+        finally:
+            client.close()
+    except Exception:
+        return []
+
+
+def _plan_workers_and_devices(gpus: List[Tuple[int, int]]) -> Tuple[int, Optional[str]]:
+    """Heuristic per-GPU concurrency based on VRAM.
+
+    Defaults to single-GPU scheduling: only use the first GPU to keep memory locality
+    and predictable utilization. Reserve ~6GB headroom; assume ~8GB per worker; cap 4.
+    """
+    if not gpus:
+        return 1, None
+    first_idx, first_mem_mb = gpus[0]
+    mem_gb = float(first_mem_mb) / 1024.0
+    slots = max(1, int(max(0.0, (mem_gb - 6.0)) // 8.0))
+    slots = min(slots, 4)
+    total_workers = max(1, slots)
+    devs = [f"cuda:{first_idx}"] * total_workers
+    return total_workers, ",".join(devs) if devs else None
+
+
 def parse_bool_flag(value: Optional[bool], prompt_text: str) -> Optional[bool]:
+    """Non-interactive defaulting: if CLI flag not provided, keep template default (None)."""
     if value is not None:
         return value
-    choice = input(f"{prompt_text} [y/n/空=默认]: ").strip().lower()
-    if choice == "y":
-        return True
-    if choice == "n":
-        return False
+    # Do not prompt; return None to use config defaults downstream
+    print(f"{prompt_text}: 使用默认", file=sys.stderr)
     return None
 
 
 def prompt_int_choice(prompt_text: str, default: int, minimum: int = 1) -> int:
+    """Non-interactive number prompt: just return default within bounds."""
     if default < minimum:
         default = minimum
-    while True:
-        raw = input(f"{prompt_text} [{default}]: ").strip()
-        if not raw:
-            return default
-        try:
-            value = int(raw)
-        except ValueError:
-            print("请输入有效的整数。\n")
-            continue
-        if value < minimum:
-            print(f"请输入不小于 {minimum} 的整数。\n")
-            continue
-        return value
+    print(f"{prompt_text}: 使用默认 {default}", file=sys.stderr)
+    return default
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -800,6 +839,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         runtime_group = runtime_template.get("group_by_speaker")
         group_by_speaker = runtime_group if isinstance(runtime_group, bool) else True
 
+    # 自动规划 devices/num_workers
+    auto_devices: Optional[str] = None
+    if args.devices is None or not str(args.devices).strip():
+        if args.num_workers is None:
+            # 未指定 num_workers：查询远端 GPU，基于显存规划（默认单卡）
+            gpus = _query_remote_gpus_quick(login, password)
+            if gpus:
+                planned_workers, planned_devices = _plan_workers_and_devices(gpus)
+                if planned_workers and planned_devices:
+                    print(
+                        f"自动检测到 {len(gpus)} 块 GPU，规划 workers={planned_workers}，devices={planned_devices}"
+                    )
+                    num_workers = planned_workers
+                    auto_devices = planned_devices
+        else:
+            # 已指定 num_workers 但未指定 devices：默认将所有 worker 绑到 cuda:0
+            auto_devices = ",".join(["cuda:0"] * int(max(1, num_workers)))
+
     overrides = RuntimeOverrides(
         device=args.device,
         use_fp16=use_fp16,
@@ -808,7 +865,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         cfg_path=args.cfg_path,
         model_dir=args.model_dir,
         num_workers=num_workers,
-        devices=args.devices,
+        devices=(args.devices or auto_devices),
         group_by_speaker=group_by_speaker,
     )
 
