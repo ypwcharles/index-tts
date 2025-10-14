@@ -362,8 +362,8 @@ def _worker_main(
             voice = voices[speaker]
             sr, audio = synthesize_segment(tts, voice, sentence, worker_runtime)
             audio = audio.to(torch.float32).cpu().contiguous()
-            # Include speaker so the scheduler can honor affinity
-            result_queue.put((idx, sr, audio, speaker))
+            # Include speaker and worker id so the scheduler can honor affinity and feed the same worker
+            result_queue.put((idx, sr, audio, speaker, worker_id))
     except Exception as exc:  # pragma: no cover - defensive guard
         import traceback
 
@@ -930,42 +930,32 @@ def run_parallel_dynamic(
                     proc.terminate()
                 raise RuntimeError(f"worker {worker_id} 失败: {message}\n{tb}")
             continue
-        if isinstance(payload, tuple) and len(payload) == 4:
-            idx, sr, audio, spk = payload
+        if isinstance(payload, tuple) and len(payload) >= 4:
+            if len(payload) == 5:
+                idx, sr, audio, spk, wid_done = payload
+            else:
+                idx, sr, audio, spk = payload
+                wid_done = None
         else:
             idx, sr, audio = payload  # type: ignore[misc]
             spk = None
+            wid_done = None
         results[idx] = (sr, audio)
         if progress_cb:
             progress_cb(idx, sr, audio)
         completed += 1
 
-        # Identify which worker finished by checking which last assignment index belongs where
-        # Lightweight approach: remember last speaker per worker via last_spk dict updated on assignment
-        # Here, we cannot directly know wid; instead, we round-robin feed next tasks fairly
-        # Improve: try to assign using same speaker as the one just finished
-        target_wid = min(range(num_workers), key=lambda i: 0)  # placeholder, we'll just feed all workers in sequence
-        # Assign next for a worker that likely just became idle; iterate all workers and feed the first that has an empty queue buffer
-        fed = False
-        for wid in range(num_workers):
-            # Non-blocking heuristic: always try to top up each worker with one task if available
-            item = _pop_for_speaker(spk if spk in per_spk else None)
+        # Feed the same worker that just finished (true dynamic scheduling)
+        if assigned < total:
+            target_wid = wid_done if wid_done is not None else 0
+            preferred_spk = spk if (spk in per_spk) else None
+            item = _pop_for_speaker(preferred_spk)
             if item is None:
-                continue
-            task_queues[wid].put(item)
-            last_spk[wid] = item[1]
-            fed = True
-            break
-        if not fed and assigned < total:
-            # Fallback: feed any available
-            for wid in range(num_workers):
                 item = _pop_for_speaker(None)
-                if item is None:
-                    continue
-                task_queues[wid].put(item)
-                last_spk[wid] = item[1]
-                fed = True
-                break
+            if item is not None:
+                task_queues[target_wid].put(item)
+                last_spk[target_wid] = item[1]
+                assigned += 1
 
     # Signal termination
     for q in task_queues:
