@@ -359,9 +359,16 @@ def _worker_main(
             if payload is None:
                 break
             idx, speaker, sentence = payload
+            # Log start of synthesis for clear per-worker visibility
+            preview = sentence.strip().replace("\n", " ")
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            print(f"start idx={idx} spk={speaker} chars={len(sentence)} | {preview}")
             voice = voices[speaker]
             sr, audio = synthesize_segment(tts, voice, sentence, worker_runtime)
             audio = audio.to(torch.float32).cpu().contiguous()
+            secs = audio.shape[-1] / float(sr) if sr > 0 else 0.0
+            print(f"done  idx={idx} spk={speaker} sr={sr} secs={secs:.2f}")
             # Include speaker and worker id so the scheduler can honor affinity and feed the same worker
             result_queue.put((idx, sr, audio, speaker, worker_id))
     except Exception as exc:  # pragma: no cover - defensive guard
@@ -916,6 +923,7 @@ def run_parallel_dynamic(
             task_queues[wid].put(None)
             continue
         task_queues[wid].put(item)
+        print(f"[sched] dispatch w{wid}: idx={item[0]} spk={item[1]} chars={len(item[2])}")
         assigned += 1
 
     results: Dict[int, Tuple[int, torch.Tensor]] = {}
@@ -955,6 +963,7 @@ def run_parallel_dynamic(
             if item is not None:
                 task_queues[target_wid].put(item)
                 last_spk[target_wid] = item[1]
+                print(f"[sched] dispatch w{target_wid}: idx={item[0]} spk={item[1]} chars={len(item[2])}")
                 assigned += 1
 
     # Signal termination
