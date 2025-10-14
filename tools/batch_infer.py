@@ -402,49 +402,67 @@ def build_worker_partitions(
     if not group_by_speaker or num_workers == 1:
         for idx, task in enumerate(tasks):
             partitions[idx % num_workers].append(task)
-        for bucket in partitions:
-            bucket.sort(key=lambda item: item[0])
         return partitions
 
-    speaker_tasks: Dict[str, List[Tuple[int, str, str]]] = {}
-    for task in tasks:
-        speaker_tasks.setdefault(task[1], []).append(task)
+    # 1) 构建“连续同说话人”的块（保持块内原有顺序）
+    blocks_by_speaker: Dict[str, List[List[Tuple[int, str, str]]]] = {}
+    def _push_block(spk: str, block: List[Tuple[int, str, str]]):
+        if block:
+            blocks_by_speaker.setdefault(spk, []).append(block)
 
-    # compute weight per speaker: sum of character length to approximate workload
-    def speaker_weight(items: List[Tuple[int, str, str]]) -> int:
-        return sum(len(entry[2]) for entry in items)
+    cur_spk = tasks[0][1]
+    cur_block: List[Tuple[int, str, str]] = []
+    for item in tasks:
+        _, spk, _ = item
+        if spk != cur_spk and cur_block:
+            _push_block(cur_spk, cur_block)
+            cur_block = []
+            cur_spk = spk
+        cur_block.append(item)
+    _push_block(cur_spk, cur_block)
 
-    ordered_speakers = sorted(
-        speaker_tasks.items(), key=lambda kv: speaker_weight(kv[1]), reverse=True
-    )
+    # 2) 计算权重（按字符数近似耗时）
+    def weight_items(items: List[Tuple[int, str, str]]) -> int:
+        return sum(len(t) for _, _, t in items)
+    def weight_blocks(blocks: List[List[Tuple[int, str, str]]]) -> int:
+        return sum(weight_items(b) for b in blocks)
 
-    # 目标负载：用于将“超重”的说话人拆分成多个块，避免单 worker 长时间独占
-    total_weight = sum(speaker_weight(v) for _, v in ordered_speakers) or 1
-    target_per_worker = max(1, total_weight / float(max(1, num_workers)))
+    speakers_ordered = sorted(blocks_by_speaker.items(), key=lambda kv: weight_blocks(kv[1]), reverse=True)
+    total_weight = sum(weight_blocks(blks) for _, blks in speakers_ordered) or 1
+    target = total_weight / float(num_workers)
 
-    def _split_chunks(items: List[Tuple[int, str, str]], n_chunks: int) -> List[List[Tuple[int, str, str]]]:
-        n = max(1, min(n_chunks, len(items)))
-        # 连续切分，尽量保持时间顺序相邻的片段在同一块
-        size = int(math.ceil(len(items) / float(n)))
-        return [items[i : i + size] for i in range(0, len(items), size)]
-
+    # 3) 先尽量把整个说话人放到最空闲 worker；过重时按块顺序拆分到多个最空闲 worker
     loads = [0] * num_workers
-    for speaker, items in ordered_speakers:
-        w = speaker_weight(items)
-        # 根据重量估算需要拆成几块；最多不超过 worker 数，避免过度切分
-        est_chunks = int(math.ceil(w / target_per_worker)) if target_per_worker > 0 else 1
-        est_chunks = max(1, min(est_chunks, num_workers))
-        # 进一步限制每个说话人切分上限，避免频繁切换（经验上 4 足够）
-        est_chunks = min(est_chunks, 4)
-        chunks = _split_chunks(items, est_chunks)
-        for chunk in chunks:
-            cw = speaker_weight(chunk)
-            target_worker = min(range(num_workers), key=lambda wid: loads[wid])
-            partitions[target_worker].extend(chunk)
-            loads[target_worker] += cw
-
-    for bucket in partitions:
-        bucket.sort(key=lambda item: item[0])
+    for spk, blks in speakers_ordered:
+        spk_w = weight_blocks(blks)
+        wid = min(range(num_workers), key=lambda i: loads[i])
+        if loads[wid] + spk_w <= target * 1.15 or loads[wid] == 0:
+            for block in blks:
+                partitions[wid].extend(block)
+            loads[wid] += spk_w
+            continue
+        remaining = list(blks)
+        while remaining:
+            wid = min(range(num_workers), key=lambda i: loads[i])
+            budget = max(target * 1.10 - loads[wid], 0.0)
+            if budget <= 0 and loads[wid] > 0:
+                budget = float('inf')
+            acc = 0
+            take_n = 0
+            for i, block in enumerate(remaining):
+                w = weight_items(block)
+                if acc + w <= budget or budget == float('inf'):
+                    acc += w
+                    take_n = i + 1
+                else:
+                    break
+            if take_n <= 0:
+                take_n = 1
+                acc = weight_items(remaining[0])
+            for block in remaining[:take_n]:
+                partitions[wid].extend(block)
+            loads[wid] += acc
+            remaining = remaining[take_n:]
 
     return partitions
 
@@ -464,35 +482,41 @@ def run_parallel(
     if worker_devices:
         print(f"worker 设备分配: {', '.join(worker_devices)}")
 
+    # 静态分配：基于文本长度均衡+语者连续性的预分区
     partitions = build_worker_partitions(tasks, num_workers, runtime.group_by_speaker)
 
     for worker_idx, bucket in enumerate(partitions):
         if not bucket:
             print(f"worker {worker_idx}: 无任务")
             continue
-        speakers = sorted({item[1] for item in bucket})
-        print(
-            f"worker {worker_idx}: 片段 {len(bucket)} 个，涉及说话人 {', '.join(speakers)}"
-        )
+        # 展示该 worker 的说话人序列，便于检查“连续性”
+        seq = []
+        last = None
+        for _, spk, _ in bucket:
+            if spk != last:
+                seq.append(spk)
+                last = spk
+        print(f"worker {worker_idx}: 片段 {len(bucket)} 个，涉及说话人序列 {', '.join(seq)}")
 
     processes: List[mp.Process] = []
     task_queues: List[mp.Queue] = []
     for worker_idx in range(num_workers):
-        task_queue: mp.Queue = mp.Queue()
-        task_queues.append(task_queue)
+        q: mp.Queue = mp.Queue()
+        task_queues.append(q)
         device = worker_devices[worker_idx % len(worker_devices)] if worker_devices else None
         process = mp.Process(
             target=_worker_main,
-            args=(task_queue, result_queue, error_queue, runtime, voices, device, worker_idx),
+            args=(q, result_queue, error_queue, runtime, voices, device, worker_idx),
         )
         process.start()
         processes.append(process)
 
-    for worker_idx, worker_tasks in enumerate(partitions):
-        queue_obj = task_queues[worker_idx]
-        for payload in worker_tasks:
-            queue_obj.put(payload)
-        queue_obj.put(None)
+    # 将规划后的任务顺序入队（不再按 idx 排序，保留“连续语者”）
+    for worker_idx, bucket in enumerate(partitions):
+        q = task_queues[worker_idx]
+        for payload in bucket:
+            q.put(payload)
+        q.put(None)
 
     results: Dict[int, Tuple[int, torch.Tensor]] = {}
     remaining = len(tasks)
