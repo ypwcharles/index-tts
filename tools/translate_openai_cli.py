@@ -113,6 +113,16 @@ def parse_args() -> argparse.Namespace:
         "--fallback-narrator",
         help="If [speakerY] appears but is unavailable, rewrite it to this tag (e.g., speaker0)",
     )
+    p.add_argument(
+        "--auto-fix-unknown-tags",
+        action="store_true",
+        help="Automatically rewrite unknown speaker tags to a fallback when ensuring speakers",
+    )
+    p.add_argument(
+        "--no-autofix-confirm",
+        action="store_true",
+        help="Do not prompt for confirmation when auto-fixing tags (non-interactive)",
+    )
     return p.parse_args()
 
 
@@ -363,6 +373,26 @@ def main() -> None:
                 tags.add(m.group(1).strip())
         return tags
 
+    def _tag_counts(text: str) -> Dict[str, int]:
+        import re
+        counts: Dict[str, int] = {}
+        for line in text.splitlines():
+            m = re.match(r"^\s*\[([^\]]+)\]", line)
+            if not m:
+                continue
+            tag = m.group(1).strip()
+            counts[tag] = counts.get(tag, 0) + 1
+        return counts
+
+    def _confirm(prompt: str) -> bool:
+        try:
+            if not sys.stdin.isatty():
+                return True
+        except Exception:
+            return True
+        ans = input(f"{prompt} (Y/n): ").strip().lower()
+        return ans in {"", "y", "yes"}
+
     if script:
         rewrite_map: Dict[str, str] = {}
         # CLI remaps first
@@ -384,13 +414,43 @@ def main() -> None:
         # Apply rewrite
         if rewrite_map:
             script = _rewrite_script_tags(script, rewrite_map)
-        # Strict check against available samples
+        # Strict check vs. available samples, with optional auto-fix
         if args.ensure_speakers_from:
             avail = _collect_available_speakers(args.ensure_speakers_from)
-            missing = sorted(t for t in _used_tags(script) if t not in avail)
+            used = _used_tags(script)
+            missing = sorted(t for t in used if t not in avail)
             if missing:
-                hint = ", ".join(missing)
-                raise SystemExit(f"脚本中存在未提供样本的说话人标签: {hint}")
+                if args.auto_fix_unknown_tags:
+                    # Choose fallback as the most frequent available tag in the current script
+                    counts = _tag_counts(script)
+                    candidate_counts = {tag: counts.get(tag, 0) for tag in avail}
+                    # Prefer non-zero counts; if all zero, fall back to speakerY or first avail
+                    non_zero = {k: v for k, v in candidate_counts.items() if v > 0}
+                    if non_zero:
+                        fallback = max(non_zero.items(), key=lambda kv: kv[1])[0]
+                    else:
+                        if "speakerY" in avail:
+                            fallback = "speakerY"
+                        else:
+                            fallback = sorted(avail)[0] if avail else None
+                    if fallback:
+                        preview_map = {t: fallback for t in missing}
+                        action_msg = f"检测到未知标签: {', '.join(missing)} -> 将自动重写为: {fallback}"
+                        print(f"[info] {action_msg}")
+                        if (not args.no_autofix_confirm) and not _confirm("是否确认此重写?"):
+                            raise SystemExit("已取消自动重写；请手动修正或使用 --rewrite-speaker 传入映射。")
+                        script = _rewrite_script_tags(script, preview_map)
+                        fixed_used = _used_tags(script)
+                        still_missing = sorted(t for t in fixed_used if t not in avail)
+                        if still_missing:
+                            hint = ", ".join(still_missing)
+                            raise SystemExit(f"脚本中存在未提供样本的说话人标签(自动修复后仍残留): {hint}")
+                    else:
+                        hint = ", ".join(missing)
+                        raise SystemExit(f"脚本中存在未提供样本的说话人标签，且无法选择 fallback: {hint}")
+                else:
+                    hint = ", ".join(missing)
+                    raise SystemExit(f"脚本中存在未提供样本的说话人标签: {hint}")
         script_path.write_text(script, encoding="utf-8")
     if analysis:
         analysis_path.write_text(analysis, encoding="utf-8")

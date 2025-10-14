@@ -464,6 +464,74 @@ def build_worker_partitions(
             loads[wid] += acc
             remaining = remaining[take_n:]
 
+    # 4) 轻量级后均衡：若存在明显闲置的 worker，尝试从最繁忙的 worker 窃取一个“块”
+    loads = [sum(len(t) for _, _, t in bucket) for bucket in partitions]
+    if num_workers > 1:
+        target = (sum(loads) / float(num_workers)) if sum(loads) > 0 else 0
+        def _blocks_of(bucket: List[Tuple[int, str, str]]) -> List[List[Tuple[int, str, str]]]:
+            blocks: List[List[Tuple[int, str, str]]] = []
+            cur: List[Tuple[int, str, str]] = []
+            last = None
+            for it in bucket:
+                _, spk, _ = it
+                if last is None or spk == last:
+                    cur.append(it)
+                else:
+                    blocks.append(cur)
+                    cur = [it]
+                last = spk
+            if cur:
+                blocks.append(cur)
+            return blocks
+        # 最多做若干次微调
+        for _ in range(8):
+            if not loads:
+                break
+            hi = max(range(num_workers), key=lambda i: loads[i])
+            lo = min(range(num_workers), key=lambda i: loads[i])
+            if target <= 0:
+                break
+            # 若最小负载已接近目标，停止
+            if loads[lo] >= target * 0.75:
+                break
+            # 从最繁忙的 worker 中挑一个块搬运到最闲 worker：选择使差距缩小最多的块
+            candidate_blocks = _blocks_of(partitions[hi])
+            if not candidate_blocks:
+                break
+            best_idx = -1
+            best_gain = 0
+            move_weight = 0
+            for idx_b, block in enumerate(candidate_blocks):
+                w = sum(len(t) for _, _, t in block)
+                # 估算搬运收益：减少 (loads[hi]-loads[lo])
+                gain = min(w, (loads[hi] - loads[lo]))
+                if gain > best_gain:
+                    best_gain = gain
+                    best_idx = idx_b
+                    move_weight = w
+            if best_idx < 0 or move_weight <= 0:
+                break
+            # 实际移动：在原分区中找到该块（按顺序）并移除，再追加到 lo
+            block = candidate_blocks[best_idx]
+            # 从 partitions[hi] 中移除该连续块（匹配首次出现的连续序列）
+            seq = block
+            # 找到起始索引
+            def _find_subseq(hay: List[Tuple[int, str, str]], needle: List[Tuple[int, str, str]]):
+                L, N = len(hay), len(needle)
+                for s in range(0, L - N + 1):
+                    if hay[s : s + N] == needle:
+                        return s
+                return -1
+            start = _find_subseq(partitions[hi], seq)
+            if start >= 0:
+                del partitions[hi][start : start + len(seq)]
+                partitions[lo].extend(seq)
+                loads[hi] -= move_weight
+                loads[lo] += move_weight
+            else:
+                # 找不到连续序列则放弃本轮
+                break
+
     return partitions
 
 

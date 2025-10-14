@@ -17,12 +17,14 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import paramiko
 import stat
+import re as _re
 
 
 PROJECT_BASE = Path("/Users/peiwenyang/Development/podcasts-test")
@@ -347,24 +349,74 @@ class EpisodePipeline:
     # ---------- 项目层操作 ----------
 
     def ensure_audio(self) -> Path:
+        """Locate or import the episode audio without unnecessary prompts.
+
+        Heuristics:
+        - Prefer files under <episode>/raw/ if present.
+        - Else scan <episode>/ for typical audio files; if exactly one, import it.
+        - If multiple, prefer filename containing the episode_id; else pick the largest.
+        - Only prompt for a path when no suitable candidate is found.
+        """
         raw_dir = self.state.root / "raw"
-        candidates = sorted(raw_dir.glob("*"))
-        if candidates:
-            if self.dry_run:
-                audio = candidates[0]
-            else:
-                choices = [path.name for path in candidates]
-                idx = choose("选择要处理的音频", choices, 0)
-                audio = candidates[idx]
-        else:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+
+        def _pick_candidate(paths: List[Path]) -> Optional[Path]:
+            if not paths:
+                return None
+            if len(paths) == 1:
+                return paths[0]
+            # Prefer filename containing episode_id
+            epi = self.state.episode_id.lower()
+            matched = [p for p in paths if epi in p.stem.lower()]
+            if matched:
+                # If multiple matched, pick the largest
+                try:
+                    matched.sort(key=lambda p: p.stat().st_size, reverse=True)
+                    return matched[0]
+                except Exception:
+                    return matched[0]
+            # Fallback: pick largest file
+            try:
+                paths.sort(key=lambda p: p.stat().st_size, reverse=True)
+                return paths[0]
+            except Exception:
+                return paths[0]
+
+        # 1) Raw folder candidates
+        candidates = [p for p in raw_dir.glob("*") if p.is_file()]
+        audio: Optional[Path] = _pick_candidate(candidates)
+
+        # 2) If none, scan episode root for typical audio and import
+        if audio is None:
+            exts = {".mp3", ".wav", ".flac", ".m4a", ".ogg", ".aac"}
+            root_candidates = [
+                p for p in self.state.root.iterdir()
+                if p.is_file() and p.suffix.lower() in exts
+            ]
+            pick = _pick_candidate(root_candidates)
+            if pick is not None:
+                dest = raw_dir / pick.name
+                try:
+                    shutil.copy2(pick, dest)
+                    audio = dest
+                except Exception:
+                    audio = pick if pick.parent == raw_dir else None
+
+        # 3) If still none, prompt user as a last resort
+        if audio is None:
             while True:
                 src = Path(prompt("请输入音频文件路径"))
                 if src.is_file():
                     dest = raw_dir / src.name
-                    shutil.copy2(src, dest)
-                    audio = dest
+                    try:
+                        shutil.copy2(src, dest)
+                        audio = dest
+                    except Exception:
+                        audio = src
                     break
                 print("文件不存在，请重试。")
+
+        assert audio is not None
         self.state.audio_file = audio.name
         self.state.save()
         return audio
@@ -592,7 +644,20 @@ class EpisodePipeline:
             raise PipelineError("缺少本地 WhisperX 产物 (音频/JSON)")
 
         local_samples = self.state.root / "samples"
-        if local_samples.exists():
+        # 在清空目录前，若存在旧的 manifest，先备份以便避免重复选择
+        prev_manifest: Optional[Path] = None
+        if local_samples.is_dir():
+            maybe_manifest = local_samples / "manifest.json"
+            if maybe_manifest.is_file():
+                logs_dir = self.state.root / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+                prev_manifest = logs_dir / f"samples_prev_{ts}.json"
+                try:
+                    shutil.copy2(maybe_manifest, prev_manifest)
+                except Exception:
+                    prev_manifest = None
+            # 清空 samples 目录
             for entry in local_samples.iterdir():
                 if entry.is_dir():
                     shutil.rmtree(entry)
@@ -657,15 +722,58 @@ class EpisodePipeline:
         translate_thread: Optional[threading.Thread] = None
         translate_ok = {"ok": False, "script": None, "analysis": None}
 
+        def _collect_available_speakers(dir_path: Path) -> set[str]:
+            tags: set[str] = set()
+            if not dir_path or not dir_path.is_dir():
+                return tags
+            for entry in dir_path.iterdir():
+                if not entry.is_file():
+                    continue
+                if entry.suffix.lower() not in {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}:
+                    continue
+                m = _re.match(r"^(speaker[0-9A-Za-z]+)$", entry.stem)
+                if m:
+                    tags.add(m.group(1))
+            return tags
+
+        def _used_tags(script_file: Path) -> set[str]:
+            tags: set[str] = set()
+            try:
+                text = script_file.read_text(encoding="utf-8")
+            except Exception:
+                return tags
+            for line in text.splitlines():
+                m = _re.match(r"^\s*\[([^\]]+)\]", line)
+                if m:
+                    tags.add(m.group(1).strip())
+            return tags
+
+        def _script_compatible(script_file: Path, samples_dir: Path) -> bool:
+            if not script_file.is_file():
+                return False
+            try:
+                if script_file.stat().st_size <= 0:
+                    return False
+            except Exception:
+                return False
+            used = _used_tags(script_file)
+            avail = _collect_available_speakers(samples_dir)
+            # 所有使用到的标签都应在样本中可用
+            return bool(used) and used.issubset(avail) if avail else False
+
         def _run_local_translate_background() -> None:
             # 目标目录: <episode>/translate
             local_translate = self.state.root / "translate"
             local_translate.mkdir(parents=True, exist_ok=True)
-            for entry in list(local_translate.iterdir()):
-                if entry.is_dir():
-                    shutil.rmtree(entry)
-                else:
-                    entry.unlink()
+            # 如已有可用脚本且与当前样本一致，则复用，不覆写
+            script_path = local_translate / "script.txt"
+            if _script_compatible(script_path, self.state.root / "samples"):
+                translate_ok["ok"] = True
+                translate_ok["script"] = str(script_path)
+                analysis_path = local_translate / "analysis.md"
+                if analysis_path.is_file():
+                    translate_ok["analysis"] = str(analysis_path)
+                return
             transcript_local = local_handoff.get("best", {}).get("transcript_txt")
             if not transcript_local or not Path(transcript_local).is_file():
                 # 极端情况：按远端命名惯例在本地查找
@@ -686,6 +794,11 @@ class EpisodePipeline:
                 str(local_translate / "script.txt"),
                 "--analysis-out",
                 str(local_translate / "analysis.md"),
+                "--ensure-speakers-from",
+                str(self.state.root / "samples"),
+                "--auto-fix-unknown-tags",
+                "--fallback-narrator",
+                "speakerY",
             ]
             # 翻译参数（与 step_translate 保持一致）
             params = self.state.params.setdefault("translate", {})
@@ -729,6 +842,10 @@ class EpisodePipeline:
             "--workers",
             "4",
         ]
+        # 尽量避免重复：传入上一次 manifest 做避让；并设置随机种子
+        if prev_manifest and prev_manifest.is_file():
+            cmd_extract.extend(["--avoid-manifest", str(prev_manifest)])
+        cmd_extract.extend(["--random-seed", str(int(time.time()))])
         print("本地执行样本提取:")
         print(" ".join(shlex.quote(p) for p in cmd_extract))
         res1 = subprocess.run(cmd_extract, cwd=str(Path.cwd()), text=True)
@@ -837,12 +954,39 @@ class EpisodePipeline:
             def do_local_translate() -> Tuple[Path, Path]:
                 local_translate = self.state.root / "translate"
                 local_translate.mkdir(parents=True, exist_ok=True)
-                # 清空旧产物
-                for entry in list(local_translate.iterdir()):
-                    if entry.is_dir():
-                        shutil.rmtree(entry)
-                    else:
-                        entry.unlink()
+                # 如已有可用脚本且与当前样本一致，则不覆写
+                existing_script = local_translate / "script.txt"
+                if existing_script.is_file():
+                    # 复用与 step_samples 相同的兼容性判定
+                    def _collect_available_speakers(dir_path: Path) -> set[str]:
+                        tags: set[str] = set()
+                        if not dir_path or not dir_path.is_dir():
+                            return tags
+                        for entry in dir_path.iterdir():
+                            if not entry.is_file():
+                                continue
+                            if entry.suffix.lower() not in {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac"}:
+                                continue
+                            m = _re.match(r"^(speaker[0-9A-Za-z]+)$", entry.stem)
+                            if m:
+                                tags.add(m.group(1))
+                        return tags
+                    def _used_tags(script_file: Path) -> set[str]:
+                        tags: set[str] = set()
+                        try:
+                            text = script_file.read_text(encoding="utf-8")
+                        except Exception:
+                            return tags
+                        for line in text.splitlines():
+                            m = _re.match(r"^\s*\[([^\]]+)\]", line)
+                            if m:
+                                tags.add(m.group(1).strip())
+                        return tags
+                    used = _used_tags(existing_script)
+                    avail = _collect_available_speakers(self.state.root / "samples")
+                    if used and used.issubset(avail):
+                        analysis_path = local_translate / "analysis.md"
+                        return existing_script, analysis_path
                 # 直接使用 handoff 中的本地 transcript
                 local_transcript = transcript
                 if not Path(local_transcript).is_file():
@@ -866,6 +1010,9 @@ class EpisodePipeline:
                     str(local_translate / "analysis.md"),
                     "--ensure-speakers-from",
                     str(self.state.root / "samples"),
+                    "--auto-fix-unknown-tags",
+                    "--fallback-narrator",
+                    "speakerY",
                 ]
                 print("改为本地执行翻译:")
                 print(" ".join(shlex.quote(p) for p in cmd_local))
@@ -1172,7 +1319,7 @@ class EpisodePipeline:
         print("TTS 合成完成。")
 
 
-def prompt_remote_config() -> RemoteConfig:
+def prompt_remote_config(*, auto_accept: bool = False) -> RemoteConfig:
     print_header("配置远程连接")
     while True:
         # 仅需粘贴 SSH 指令（或逐项输入），其它目录固定为默认值
@@ -1244,15 +1391,16 @@ def prompt_remote_config() -> RemoteConfig:
             f"远程工作根目录: {DEFAULT_REMOTE_WORKDIR}\n"
             f"WhisperX 项目目录: {DEFAULT_WHISPERX_PROJECT}\n"
         )
+        if auto_accept:
+            # 直接接受，不做连通性测试或二次确认
+            return cfg
         if yes_no("以上配置是否正确?", True):
             ok, msg = _test_ssh_connection(cfg)
             if ok:
                 return cfg
             print(f"[warn] SSH 测试未通过：{msg}")
-            # 为常见的“认证失败”提供指引
             if yes_no("是否重新输入凭据并重试?", True):
                 continue
-            # 允许继续（例如用户打算使用密钥登录但暂时不可达）
             if yes_no("是否忽略警告并继续?", False):
                 return cfg
 
@@ -1293,6 +1441,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         state = select_episode()
 
+    def _try_load_saved_remote() -> Optional[RemoteConfig]:
+        m = state.remote or {}
+        try:
+            host = m.get("host")
+            port = int(m.get("port")) if m.get("port") is not None else 22
+            user = m.get("user")
+            if not host or not user:
+                return None
+            return RemoteConfig(
+                host=host,
+                port=port,
+                user=user,
+                password=m.get("password"),
+                remote_repo=m.get("remote_repo") or DEFAULT_REMOTE_REPO,
+                remote_workdir_base=m.get("remote_workdir_base") or DEFAULT_REMOTE_WORKDIR,
+                whisperx_project=m.get("whisperx_project") or DEFAULT_WHISPERX_PROJECT,
+            )
+        except Exception:
+            return None
+
     if args.dry_run:
         remote_cfg = RemoteConfig(
             host="localhost",
@@ -1304,7 +1472,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             whisperx_project=DEFAULT_WHISPERX_PROJECT,
         )
     else:
-        remote_cfg = prompt_remote_config()
+        # 若项目中已有远程配置，直接使用；否则进行一次性输入（不做测试/确认）。
+        saved = _try_load_saved_remote()
+        if saved is not None:
+            remote_cfg = saved
+        else:
+            remote_cfg = prompt_remote_config(auto_accept=True)
     pipeline = EpisodePipeline(state, remote_cfg, dry_run=bool(args.dry_run))
     try:
         pipeline.run(from_step=args.from_step)
